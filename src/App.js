@@ -52,9 +52,6 @@ function MemberAvatar({ name, size = 40 }) {
   );
 }
 
-function TeamDot({ team }) {
-  return <span className="dot" style={{ background: TEAM_META[team]?.dot }} />;
-}
 
 // ─── NAV ITEMS ────────────────────────────────────────────────────────────────
 
@@ -670,7 +667,6 @@ export default function App() {
               SALES / COLLECTIONS / DISTRICT LEADERS  (manual scheduling)
           ════════════════════════════════════════════════════════════════ */}
           {['sales','collections','districts'].map(teamKey => {
-            const teamMap = { sales:'sales', collections:'collections', districts:'districts' };
             const roleMap  = { sales:'Sales Rep', collections:'Collections', districts:'District Leader' };
             const pageMap  = { sales:'sales', collections:'collections', districts:'districts' };
             if (page !== pageMap[teamKey]) return null;
