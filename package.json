@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "dependencies": {
+    "@supabase/supabase-js": "^2.108.1",
     "ajv": "^8.20.0",
     "ajv-keywords": "^5.1.0",
     "date-fns": "^3.6.0",
