@@ -254,7 +254,10 @@ export function AppProvider({ children }) {
         (payload) => {
           if (payload.eventType === 'DELETE') {
             dispatch({ type: 'REMOVE_MEMBER', id: payload.old.id, team: payload.old.team });
-          } else {
+          } else if (payload.new && payload.new.active === false) {
+            // Soft-delete: treat inactive members as removed
+            dispatch({ type: 'REMOVE_MEMBER', id: payload.new.id, team: payload.new.team });
+          } else if (payload.new) {
             dispatch({ type: 'UPSERT_MEMBER', member: payload.new });
           }
         }
