@@ -149,12 +149,27 @@ export default function App() {
     }));
   };
 
-  // ── Team updaters (now persist to Supabase) ──
+  // ── Local edits buffer (optimistic UI for text inputs) ──
+  const [localEdits, setLocalEdits] = useState({});
+  const saveTimers = useRef({});
+
+  // ── Team updaters (optimistic local + debounced Supabase save) ──
   const updateMember = (teamKey, id, field, value) => {
-    const dbField = field === 'shiftAnchor' ? 'shift_anchor'
-                  : field === 'rotationOffset' ? 'rotation_offset'
-                  : field;
-    dbUpdateMember(id, { [dbField]: value });
+    // 1. Update local buffer immediately so input feels responsive
+    setLocalEdits(p => ({
+      ...p,
+      [id]: { ...(p[id] || {}), [field]: value }
+    }));
+
+    // 2. Debounce the Supabase write (500ms after last keystroke)
+    const timerKey = `${id}_${field}`;
+    if (saveTimers.current[timerKey]) clearTimeout(saveTimers.current[timerKey]);
+    saveTimers.current[timerKey] = setTimeout(() => {
+      const dbField = field === 'shiftAnchor' ? 'shift_anchor'
+                    : field === 'rotationOffset' ? 'rotation_offset'
+                    : field;
+      dbUpdateMember(id, { [dbField]: value });
+    }, 500);
   };
 
   const addMember = (teamKey, role) => {
@@ -171,7 +186,20 @@ export default function App() {
   };
 
   const removeMember = (teamKey, id) => {
+    // Clear any pending saves for this member
+    Object.keys(saveTimers.current).forEach(k => {
+      if (k.startsWith(id)) clearTimeout(saveTimers.current[k]);
+    });
+    setLocalEdits(p => { const n = {...p}; delete n[id]; return n; });
     dbRemoveMember(id, teamKey);
+  };
+
+  // ── Helper: get member field value (local edit buffer takes priority) ──
+  const getMemberValue = (m, field) => {
+    if (localEdits[m.id] && localEdits[m.id][field] !== undefined) {
+      return localEdits[m.id][field];
+    }
+    return m[field] ?? m[field === 'shiftAnchor' ? 'shift_anchor' : field === 'rotationOffset' ? 'rotation_offset' : field] ?? '';
   };
 
   // ── File uploads ──
@@ -798,19 +826,19 @@ export default function App() {
                     <tbody>
                       {activeTeams[tk].map(m=>(
                         <tr key={m.id}>
-                          <td><input className="inline-input" value={m.name} onChange={e=>updateMember(tk,m.id,'name',e.target.value)}/></td>
-                          <td><input className="inline-input" value={m.role} onChange={e=>updateMember(tk,m.id,'role',e.target.value)}/></td>
-                          <td><input className="inline-input" style={{minWidth:200}} value={m.sites||''} onChange={e=>updateMember(tk,m.id,'sites',e.target.value)} placeholder="Location 1, Location 2..."/></td>
+                          <td><input className="inline-input" value={getMemberValue(m,'name')} onChange={e=>updateMember(tk,m.id,'name',e.target.value)}/></td>
+                          <td><input className="inline-input" value={getMemberValue(m,'role')} onChange={e=>updateMember(tk,m.id,'role',e.target.value)}/></td>
+                          <td><input className="inline-input" style={{minWidth:200}} value={getMemberValue(m,'sites')} onChange={e=>updateMember(tk,m.id,'sites',e.target.value)} placeholder="Location 1, Location 2..."/></td>
                           {tk==='callCenter' && (
                             <>
                               <td>
-                                <select className="inline-select" value={m.shift_anchor||m.shiftAnchor||''} onChange={e=>updateMember(tk,m.id,'shiftAnchor',e.target.value||null)}>
+                                <select className="inline-select" value={getMemberValue(m,'shiftAnchor')} onChange={e=>updateMember(tk,m.id,'shiftAnchor',e.target.value||null)}>
                                   <option value="">Flexible</option>
                                   {['A','B','C'].map(s=><option key={s} value={s}>Shift {s}</option>)}
                                 </select>
                               </td>
                               <td>
-                                <select className="inline-select" value={m.rotation_offset??m.rotationOffset??''} onChange={e=>updateMember(tk,m.id,'rotationOffset',e.target.value!==''?Number(e.target.value):undefined)}>
+                                <select className="inline-select" value={getMemberValue(m,'rotationOffset')} onChange={e=>updateMember(tk,m.id,'rotationOffset',e.target.value!==''?Number(e.target.value):undefined)}>
                                   <option value="">Auto</option>
                                   {[0,1,2,3,4,5,6].map(n=><option key={n} value={n}>Day {n}</option>)}
                                 </select>
