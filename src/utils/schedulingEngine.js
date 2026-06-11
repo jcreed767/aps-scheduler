@@ -1,296 +1,216 @@
-import { addDays, format, parseISO, getDay } from 'date-fns';
+// src/utils/schedulingEngine.js
+// ─────────────────────────────────────────────────────────────
+// APS Scheduler — Call Center Rotation Engine v4.1
+//
+// Generates a 5-on/2-off schedule for all Call Center members
+// across a date range, applying:
+//   - Individual rotation offsets (stored in team_members.rotation_offset)
+//   - Shift anchor assignments (A / B / C)
+//   - Peak day overrides (9A/0B/1C)
+//   - Weekend defaults (same 7/2/1 split, min 1C enforced)
+//
+// Returns an array of rows ready for upsertGeneratedSchedule():
+//   [{ member_id, schedule_date, shift, is_override: false }, ...]
+// ─────────────────────────────────────────────────────────────
+import { eachDayOfInterval, format, getDay } from 'date-fns';
 
-// ─── Constants ───────────────────────────────────────────────────────────────
+// ─── Constants ───────────────────────────────────────────────
 
-export const SHIFTS = {
-  A: { id: 'A', label: 'Shift A', hours: '8am–4pm', start: 8, end: 16, color: '#3B82F6' },
-  B: { id: 'B', label: 'Shift B', hours: '12pm–8pm', start: 12, end: 20, color: '#8B5CF6' },
-  C: { id: 'C', label: 'Shift C', hours: '2pm–10pm', start: 14, end: 22, color: '#F59E0B' },
-  OFF: { id: 'OFF', label: 'Off', hours: null, color: '#E5E7EB' },
-};
+const SHIFTS = ['A', 'B', 'C'];
 
-export const DOW_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+// Default daily targets: { A: 7, B: 2, C: 1 } (10 on, 4 off)
+const DEFAULT_TARGETS = { A: 7, B: 2, C: 1 };
+const PEAK_TARGETS    = { A: 9, B: 0, C: 1 };
 
-// Peak days with special rules
-export const PEAK_DAYS = {
-  '2026-07-01': { label: 'DOM1 Peak', split: { A: 9, B: 0, C: 1 }, forecastCalls: 750 },
-  '2026-07-31': { label: 'Month-End Peak', split: { A: 9, B: 0, C: 1 }, forecastCalls: 672 },
-};
+// Hard-coded peak days (also pulled from settings at runtime)
+const HARDCODED_PEAK_DAYS = new Set(['2026-07-01', '2026-07-31']);
 
-// High-demand dates (need max coverage but standard split)
-export const HIGH_DEMAND_DAYS = {
-  '2026-06-29': { forecastCalls: 404 },
-  '2026-06-30': { forecastCalls: 454 },
-  '2026-07-06': { forecastCalls: 412 },
-  '2026-07-20': { forecastCalls: 404 },
-  '2026-07-27': { forecastCalls: 408 },
-  '2026-07-28': { forecastCalls: 415 },
-  '2026-07-30': { forecastCalls: 419 },
-};
+// 5-on/2-off pattern: 1 = working, 0 = off
+// Position in 7-day cycle: Mon=0 … Sun=6 (JS getDay() is Sun=0, so we rotate)
+const WORK_PATTERN = [1, 1, 1, 1, 1, 0, 0]; // 5 on, 2 off
 
-// Default shift targets by day type
-export const DEFAULT_TARGETS = {
-  weekday: { A: 7, B: 2, C: 1 },
-  saturday: { A: 7, B: 2, C: 1 },
-  sunday: { A: 7, B: 2, C: 1 },
-};
+// ─── Helpers ─────────────────────────────────────────────────
 
-// Staffing model parameters
-export const STAFFING_PARAMS = {
-  aht: 6.61,
-  serviceLevelTarget: 0.80,
-  serviceLevelSeconds: 20,
-  shrinkage: 0.18,
-  adherence: 0.85,
-  effectiveSimultaneous: 6.97,
-};
-
-// ─── Date Helpers ─────────────────────────────────────────────────────────────
-
-export function getDayType(date) {
-  const dow = getDay(date); // 0=Sun, 1=Mon, ..., 6=Sat
-  if (dow === 0) return 'sunday';
-  if (dow === 6) return 'saturday';
-  return 'weekday';
+/** Is day d a working day for a member with the given rotation offset? */
+function isWorkDay(date, rotationOffset) {
+  // Use a fixed epoch anchor (2026-01-05 = Monday) so offsets are stable
+  const EPOCH = new Date('2026-01-05');
+  const diffDays = Math.round((date - EPOCH) / (1000 * 60 * 60 * 24));
+  const cyclePos = ((diffDays + rotationOffset) % 7 + 7) % 7;
+  return WORK_PATTERN[cyclePos] === 1;
 }
 
-export function getDateKey(date) {
-  return format(date, 'yyyy-MM-dd');
+/** Determine the shift target object for a given date */
+function getTargets(dateStr, settings = {}) {
+  const peakDays = new Set([
+    ...HARDCODED_PEAK_DAYS,
+    ...(settings.peak_days || []),
+  ]);
+  if (peakDays.has(dateStr)) return PEAK_TARGETS;
+
+  // Weekend: same split but enforced downstream
+  return settings.shift_targets_default || DEFAULT_TARGETS;
 }
 
-export function getAllDates(startDate, endDate) {
-  const dates = [];
-  let current = typeof startDate === 'string' ? parseISO(startDate) : startDate;
-  const end = typeof endDate === 'string' ? parseISO(endDate) : endDate;
-  while (current <= end) {
-    dates.push(new Date(current));
-    current = addDays(current, 1);
-  }
-  return dates;
-}
-
-// ─── Target Calculator ────────────────────────────────────────────────────────
-
-export function getTargetSplit(dateKey) {
-  if (PEAK_DAYS[dateKey]) return PEAK_DAYS[dateKey].split;
-  const date = parseISO(dateKey);
-  const dayType = getDayType(date);
-  return DEFAULT_TARGETS[dayType];
-}
-
-export function getForecastCalls(dateKey, forecastData) {
-  if (PEAK_DAYS[dateKey]) return PEAK_DAYS[dateKey].forecastCalls;
-  if (HIGH_DEMAND_DAYS[dateKey]) return HIGH_DEMAND_DAYS[dateKey].forecastCalls;
-  if (forecastData && forecastData[dateKey]) return forecastData[dateKey];
-  return null;
-}
-
-// ─── Rotation Engine ─────────────────────────────────────────────────────────
+// ─── Main Generator ──────────────────────────────────────────
 
 /**
- * Generates a 5-on/2-off rotation for N managers over a date range.
- * Optimizes for smooth daily coverage (target: 10 available/day).
+ * Generate a full schedule for all Call Center members across a date range.
+ *
+ * @param {Array}  members    - Array of team_member rows (team = 'callcenter')
+ * @param {Date}   startDate  - First day to generate
+ * @param {Date}   endDate    - Last day to generate (inclusive)
+ * @param {Object} settings   - App settings object (from Supabase app_settings table)
+ * @returns {Array}           - Rows ready for Supabase upsert
  */
-export function generateRotation(managers, startDate, endDate, existingSchedule = {}) {
-  const dates = getAllDates(startDate, endDate);
-  const numManagers = managers.length;
+export function generateSchedule(members, startDate, endDate, settings = {}) {
+  if (!members || members.length === 0) return [];
 
-  // Build initial rotation pattern
-  // With 14 managers on 5/2, we stagger start offsets to maximize daily coverage
-  // Cycle length = 7 days, 14 managers → 2 managers per offset slot
-  const cycleLength = 7;
-  const workDays = 5;
+  const days = eachDayOfInterval({ start: startDate, end: endDate });
+  const rows = [];
 
-  // Assign each manager a rotation offset (0–6)
-  // 14 managers / 7 slots = 2 per slot
-  const managerOffsets = {};
-  managers.forEach((m, i) => {
-    // Check if manager has an existing offset preference
-    if (m.rotationOffset !== undefined) {
-      managerOffsets[m.id] = m.rotationOffset;
-    } else {
-      managerOffsets[m.id] = Math.floor(i * cycleLength / numManagers);
-    }
-  });
+  days.forEach((date) => {
+    const dateStr = format(date, 'yyyy-MM-dd');
+    const targets = getTargets(dateStr, settings);
 
-  // Generate base working pattern for each manager
-  const schedule = {};
+    // Step 1: Split members into working vs off for this day
+    const working = [];
+    const offMembers = [];
 
-  dates.forEach((date, dayIndex) => {
-    const dateKey = getDateKey(date);
-    schedule[dateKey] = {};
-
-    managers.forEach(manager => {
-      // Check for existing/manual override
-      if (existingSchedule[dateKey] && existingSchedule[dateKey][manager.id] !== undefined) {
-        schedule[dateKey][manager.id] = existingSchedule[dateKey][manager.id];
-        return;
-      }
-
-      // Check availability constraints
-      if (manager.unavailable && manager.unavailable.includes(dateKey)) {
-        schedule[dateKey][manager.id] = 'OFF';
-        return;
-      }
-
-      const offset = managerOffsets[manager.id];
-      const adjustedDay = (dayIndex + offset) % cycleLength;
-      const isWorking = adjustedDay < workDays;
-      schedule[dateKey][manager.id] = isWorking ? 'UNASSIGNED' : 'OFF';
-    });
-  });
-
-  // Assign shifts to working managers
-  dates.forEach((date) => {
-    const dateKey = getDateKey(date);
-    const target = getTargetSplit(dateKey);
-    const daySchedule = schedule[dateKey];
-
-    // Get working managers for this day
-    const working = managers.filter(m => daySchedule[m.id] === 'UNASSIGNED');
-
-    // Sort: shift anchors first, then by shift preference, then by manager index
-    const sorted = [...working].sort((a, b) => {
-      const aAnchor = a.shiftAnchor ? ['A', 'B', 'C'].indexOf(a.shiftAnchor) : 99;
-      const bAnchor = b.shiftAnchor ? ['A', 'B', 'C'].indexOf(b.shiftAnchor) : 99;
-      return aAnchor - bAnchor;
-    });
-
-    let countA = 0, countB = 0, countC = 0;
-
-    sorted.forEach(manager => {
-      // Assign shift anchors first
-      if (manager.shiftAnchor && countA + countB + countC < working.length) {
-        const anchor = manager.shiftAnchor;
-        const limit = target[anchor];
-        if (anchor === 'A' && countA < limit) {
-          daySchedule[manager.id] = 'A';
-          countA++;
-          return;
-        }
-        if (anchor === 'B' && countB < limit) {
-          daySchedule[manager.id] = 'B';
-          countB++;
-          return;
-        }
-        if (anchor === 'C' && countC < limit) {
-          daySchedule[manager.id] = 'C';
-          countC++;
-          return;
-        }
-      }
-
-      // Fill targets in order: C first (min 1), then A, then B
-      if (countC < target.C) {
-        daySchedule[manager.id] = 'C';
-        countC++;
-      } else if (countA < target.A) {
-        daySchedule[manager.id] = 'A';
-        countA++;
-      } else if (countB < target.B) {
-        daySchedule[manager.id] = 'B';
-        countB++;
+    members.forEach((m) => {
+      const offset = m.rotation_offset ?? 0;
+      if (isWorkDay(date, offset)) {
+        working.push(m);
       } else {
-        daySchedule[manager.id] = 'A'; // overflow to A
-        countA++;
+        offMembers.push(m);
       }
     });
-  });
 
-  return schedule;
-}
+    // Step 2: Assign shifts to working members
+    // Priority: respect shift_anchor, then fill to targets
+    const assigned = assignShifts(working, targets);
 
-// ─── Coverage Analysis ────────────────────────────────────────────────────────
-
-export function analyzeCoverage(schedule, managers, forecastData = {}) {
-  const analysis = {};
-
-  Object.entries(schedule).forEach(([dateKey, daySchedule]) => {
-    const target = getTargetSplit(dateKey);
-    const counts = { A: 0, B: 0, C: 0, OFF: 0, UNASSIGNED: 0 };
-
-    managers.forEach(m => {
-      const shift = daySchedule[m.id];
-      if (shift && counts[shift] !== undefined) counts[shift]++;
+    // Step 3: Push working rows
+    assigned.forEach(({ member, shift }) => {
+      rows.push({
+        member_id: member.id,
+        schedule_date: dateStr,
+        shift,
+        is_override: false,
+      });
     });
 
-    const totalWorking = counts.A + counts.B + counts.C;
-    const gaps = {
-      A: counts.A - target.A,
-      B: counts.B - target.B,
-      C: counts.C - target.C,
-    };
-
-    const isPeak = !!PEAK_DAYS[dateKey];
-    const isHighDemand = !!HIGH_DEMAND_DAYS[dateKey];
-    const meetsTarget = gaps.A >= 0 && gaps.B >= 0 && gaps.C >= 0;
-    const forecastCalls = getForecastCalls(dateKey, forecastData);
-
-    analysis[dateKey] = {
-      counts,
-      target,
-      gaps,
-      totalWorking,
-      meetsTarget,
-      isPeak,
-      isHighDemand,
-      forecastCalls,
-    };
-  });
-
-  return analysis;
-}
-
-// ─── Manager Summary ──────────────────────────────────────────────────────────
-
-export function getManagerSummary(schedule, managers) {
-  return managers.map(manager => {
-    const summary = { id: manager.id, name: manager.name, A: 0, B: 0, C: 0, OFF: 0, total: 0 };
-
-    Object.values(schedule).forEach(daySchedule => {
-      const shift = daySchedule[manager.id];
-      if (shift === 'A') { summary.A++; summary.total++; }
-      else if (shift === 'B') { summary.B++; summary.total++; }
-      else if (shift === 'C') { summary.C++; summary.total++; }
-      else if (shift === 'OFF') summary.OFF++;
+    // Step 4: Push OFF rows
+    offMembers.forEach((m) => {
+      rows.push({
+        member_id: m.id,
+        schedule_date: dateStr,
+        shift: 'OFF',
+        is_override: false,
+      });
     });
-
-    return summary;
   });
+
+  return rows;
 }
 
-// ─── Forecast Parser ─────────────────────────────────────────────────────────
+/**
+ * Assign shifts to a pool of working members for one day.
+ * Respects shift_anchor where set, fills remaining slots by target counts.
+ */
+function assignShifts(workingMembers, targets) {
+  const assigned = [];
+  const unanchored = [];
 
-export function parseForecastFile(data) {
-  // Expects rows with date string + count
-  const forecast = {};
-  data.forEach(row => {
-    const dateStr = row['Started At: Day'] || row['date'] || row['Date'];
-    const count = row['Count'] || row['count'] || row['Calls'];
-    if (!dateStr || !count) return;
+  // Tally how many slots are consumed by anchored members
+  const remaining = { ...targets };
 
-    // Parse "Wednesday, June 3, 2026" style
-    try {
-      const parsed = new Date(dateStr.replace(/^[A-Za-z]+,\s*/, ''));
-      if (!isNaN(parsed)) {
-        const key = format(parsed, 'yyyy-MM-dd');
-        forecast[key] = Number(count);
-      }
-    } catch (e) {
-      // skip unparseable rows
+  // Pass 1: honor anchors
+  workingMembers.forEach((m) => {
+    const anchor = m.shift_anchor;
+    if (anchor && SHIFTS.includes(anchor) && remaining[anchor] > 0) {
+      assigned.push({ member: m, shift: anchor });
+      remaining[anchor]--;
+    } else {
+      unanchored.push(m);
     }
   });
-  return forecast;
+
+  // Pass 2: fill unanchored members into remaining slots
+  // Build ordered fill queue: A slots first, then B, then C
+  const fillQueue = [];
+  SHIFTS.forEach((s) => {
+    for (let i = 0; i < (remaining[s] || 0); i++) fillQueue.push(s);
+  });
+
+  unanchored.forEach((m, i) => {
+    const shift = fillQueue[i] || 'A'; // default to A if more workers than slots
+    assigned.push({ member: m, shift });
+  });
+
+  // Guarantee: at least 1 Shift C per day
+  const hasC = assigned.some((a) => a.shift === 'C');
+  if (!hasC && assigned.length > 0) {
+    // Promote the last non-C, non-anchored assignment to C
+    for (let i = assigned.length - 1; i >= 0; i--) {
+      if (assigned[i].shift !== 'C' && !assigned[i].member.shift_anchor) {
+        assigned[i].shift = 'C';
+        break;
+      }
+    }
+  }
+
+  return assigned;
 }
 
-export function parseHourlyFile(data) {
-  // Returns array of { hour, count, percentage }
-  return data
-    .filter(row => row['Started At: Hour of day'] && row['Count'])
-    .map(row => ({
-      hour: row['Started At: Hour of day'],
-      count: Number(row['Count']),
-      percentage: Number(row['Unnamed: 3'] || 0),
-      callsPerDay: Number(row['Calls per Day'] || 0),
-    }));
+// ─── Coverage Analysis ───────────────────────────────────────
+
+/**
+ * Analyze coverage for a single date given its schedule and forecast.
+ * Returns { shiftCounts, onCount, offCount, forecastCalls, gaps, isPeak }
+ */
+export function analyzeCoverage(dateStr, memberIds, ccSchedule, forecast, settings = {}) {
+  const daySchedule = ccSchedule[dateStr] || {};
+  const forecastDay = forecast[dateStr];
+
+  const shiftCounts = { A: 0, B: 0, C: 0, OFF: 0 };
+  memberIds.forEach((id) => {
+    const entry = daySchedule[id];
+    const shift = entry?.shift || 'OFF';
+    shiftCounts[shift] = (shiftCounts[shift] || 0) + 1;
+  });
+
+  const onCount = shiftCounts.A + shiftCounts.B + shiftCounts.C;
+  const offCount = shiftCounts.OFF;
+
+  const isPeak = HARDCODED_PEAK_DAYS.has(dateStr) ||
+    (settings.peak_days || []).includes(dateStr);
+  const isHighDemand = (settings.high_demand_days || []).includes(dateStr);
+
+  const targets = getTargets(dateStr, settings);
+  const gaps = [];
+  SHIFTS.forEach((s) => {
+    const target = targets[s] || 0;
+    const actual = shiftCounts[s] || 0;
+    if (actual < target) {
+      gaps.push({ shift: s, need: target - actual });
+    }
+  });
+
+  if (shiftCounts.C === 0) {
+    gaps.push({ shift: 'C', need: 1, type: 'minimum' });
+  }
+
+  return {
+    shiftCounts,
+    onCount,
+    offCount,
+    forecastCalls: forecastDay?.agent_calls || null,
+    isPeak,
+    isHighDemand,
+    gaps,
+    hasGaps: gaps.length > 0,
+  };
 }
+
+export default generateSchedule;
