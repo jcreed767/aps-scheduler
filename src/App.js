@@ -398,7 +398,7 @@ export default function App() {
                             : onShift.map(m => (
                               <div key={m.id} className="on-shift-chip">
                                 <MemberAvatar name={m.name} size={22} />
-                                {m.name.split(' ').slice(-1)[0]}
+                                {m.name.split(' ')[0]}
                                 {m.shift && m.shift !== 'ON' && (
                                   <span className={`chip-shift shift-${m.shift.toLowerCase()}`}>{m.shift}</span>
                                 )}
@@ -520,7 +520,7 @@ export default function App() {
                           <th className="col-dow sticky-col2">DOW</th>
                           {activeTeams.callCenter.map(m=>(
                             <th key={m.id} className="col-manager" title={`${m.name} · ${m.sites}`}>
-                              {m.name.split(' ').pop()}
+                              {m.name.split(' ')[0]}
                             </th>
                           ))}
                           <th className="col-summary">A</th>
