@@ -214,3 +214,8 @@ export function analyzeCoverage(dateStr, memberIds, ccSchedule, forecast, settin
 }
 
 export default generateSchedule;
+
+export function getAllDates(startDate, endDate) {
+  const { eachDayOfInterval } = require('date-fns');
+  return eachDayOfInterval({ start: new Date(startDate), end: new Date(endDate) });
+}
