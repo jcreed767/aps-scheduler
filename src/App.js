@@ -78,9 +78,12 @@ export default function App() {
   // ── Supabase context ──
   const {
     members,
+    ccSchedule: dbCCSchedule,
     addMember: dbAddMember,
     updateMember: dbUpdateMember,
     removeMember: dbRemoveMember,
+    setCCCell: dbSetCCCell,
+    regenerateSchedule: dbRegenerateSchedule,
     loading,
   } = useApp();
 
@@ -117,27 +120,52 @@ export default function App() {
 
   const dates = useMemo(() => getAllDates(startDate, endDate), [startDate, endDate]);
 
+  // ── Load schedule from Supabase on startup ──
+  // Convert dbCCSchedule { date: { memberId: {shift, override} } } to legacy format { date: { memberId: shift } }
+  const dbScheduleAsLegacy = useMemo(() => {
+    if (!dbCCSchedule || Object.keys(dbCCSchedule).length === 0) return null;
+    const result = {};
+    Object.entries(dbCCSchedule).forEach(([date, members]) => {
+      result[date] = {};
+      Object.entries(members).forEach(([memberId, entry]) => {
+        result[date][memberId] = entry.shift || entry;
+      });
+    });
+    return result;
+  }, [dbCCSchedule]);
+
+  // Use DB schedule if available, otherwise use locally generated one
+  const activeSchedule = schedule || dbScheduleAsLegacy;
+  const isGenerated = generated || (dbScheduleAsLegacy && Object.keys(dbScheduleAsLegacy).length > 0);
+
   // ── Generate CC schedule ──
   const handleGenerate = useCallback(() => {
     const s = generateRotation(activeTeams.callCenter, startDate, endDate, overrides);
-    setSchedule(s); setGenerated(true);
-  }, [activeTeams.callCenter, startDate, endDate, overrides]);
+    setSchedule(s);
+    setGenerated(true);
+    // Also persist to Supabase
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    dbRegenerateSchedule(start, end);
+  }, [activeTeams.callCenter, startDate, endDate, overrides, dbRegenerateSchedule]);
 
   const coverage = useMemo(() => {
-    if (!schedule) return {};
-    return analyzeCoverage(schedule, activeTeams.callCenter, forecastData);
-  }, [schedule, activeTeams.callCenter, forecastData]);
+    if (!activeSchedule) return {};
+    return analyzeCoverage(activeSchedule, activeTeams.callCenter, forecastData);
+  }, [activeSchedule, activeTeams.callCenter, forecastData]);
 
   const managerSummary = useMemo(() => {
-    if (!schedule) return [];
-    return getManagerSummary(schedule, activeTeams.callCenter);
-  }, [schedule, activeTeams.callCenter]);
+    if (!activeSchedule) return [];
+    return getManagerSummary(activeSchedule, activeTeams.callCenter);
+  }, [activeSchedule, activeTeams.callCenter]);
 
   // ── Cell edit ──
   const handleCellChange = (dateKey, managerId, newShift) => {
     const updated = { ...overrides, [dateKey]: { ...(overrides[dateKey]||{}), [managerId]: newShift }};
     setOverrides(updated);
     if (schedule) setSchedule(p => ({ ...p, [dateKey]: { ...p[dateKey], [managerId]: newShift }}));
+    // Persist override to Supabase
+    dbSetCCCell(managerId, dateKey, newShift);
     setEditCell(null);
   };
 
@@ -230,11 +258,11 @@ export default function App() {
 
   // ── Export ──
   const handleExport = () => {
-    if (!schedule) return;
+    if (!activeSchedule) return;
     const wb = XLSX.utils.book_new();
     const gridRows = [['Date','Day','DOW',...activeTeams.callCenter.map(m=>m.name),'A','B','C','Total','Meets Target','Forecast']];
     dates.forEach(date => {
-      const dk = getDateKey(date); const ds = schedule[dk]||{}; const cov = coverage[dk]||{};
+      const dk = getDateKey(date); const ds = activeSchedule[dk]||{}; const cov = coverage[dk]||{};
       gridRows.push([dk,format(date,'MMM d'),DOW_LABELS[getDay(date)],...activeTeams.callCenter.map(m=>ds[m.id]||'OFF'),cov.counts?.A||0,cov.counts?.B||0,cov.counts?.C||0,cov.totalWorking||0,cov.meetsTarget?'Yes':'No',cov.forecastCalls||'']);
     });
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(gridRows), 'CC Schedule');
@@ -326,7 +354,7 @@ export default function App() {
             {(page === 'cc-schedule' || page === 'dashboard') && (
               <button className="btn btn-primary" onClick={handleGenerate}>⚡ Generate Schedule</button>
             )}
-            {generated && (
+            {isGenerated && (
               <button className="btn btn-secondary" onClick={handleExport}>↓ Export</button>
             )}
           </div>
@@ -388,7 +416,7 @@ export default function App() {
                     <span>Coverage Alerts</span>
                     <span style={{fontSize:11,color:'var(--text-muted)'}}>{gapDays.length} items</span>
                   </div>
-                  {!generated ? (
+                  {!isGenerated ? (
                     <p style={{fontSize:12,color:'var(--text-muted)'}}>Generate the Call Center schedule to see coverage alerts.</p>
                   ) : gapDays.length === 0 ? (
                     <div className="all-clear">✅ No coverage gaps detected</div>
@@ -468,7 +496,7 @@ export default function App() {
           {/* CC – SCHEDULE GRID */}
           {page === 'cc-schedule' && (
             <div>
-              {!generated ? (
+              {!isGenerated ? (
                 <div className="empty-state">
                   <div className="empty-icon">📅</div>
                   <h2>No Schedule Generated Yet</h2>
@@ -505,7 +533,7 @@ export default function App() {
                       <tbody>
                         {dates.map(date => {
                           const dk = getDateKey(date);
-                          const ds = schedule[dk]||{};
+                          const ds = activeSchedule[dk]||{};
                           const cov = coverage[dk]||{};
                           const dow = getDay(date);
                           const isWknd = dow===0||dow===6;
@@ -558,7 +586,7 @@ export default function App() {
           {page === 'cc-coverage' && (
             <div>
               <h2 className="section-title">Coverage Analysis</h2>
-              {!generated ? <p className="text-muted">Generate a schedule first.</p> : (
+              {!isGenerated ? <p className="text-muted">Generate a schedule first.</p> : (
                 <>
                   <div className="stats-row">
                     <div className="stat-card good"><div className="stat-value">{Object.values(coverage).filter(c=>c.meetsTarget).length}</div><div className="stat-label">Days Meeting Target</div></div>
@@ -631,7 +659,7 @@ export default function App() {
                   </div>
                 ))}
               </div>
-              {!generated ? <p className="text-muted">Generate a schedule to see shift breakdowns.</p> : (
+              {!isGenerated ? <p className="text-muted">Generate a schedule to see shift breakdowns.</p> : (
                 <table className="data-table">
                   <thead><tr><th>Manager</th><th>Role</th><th>Sites</th><th>Shift A</th><th>Shift B</th><th>Shift C</th><th>Total Working</th><th>Days Off</th><th>Anchor</th></tr></thead>
                   <tbody>
