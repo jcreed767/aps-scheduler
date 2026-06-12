@@ -41,10 +41,39 @@ export const HIGH_DEMAND_DAYS = {
 
 // ─── Helpers ─────────────────────────────────────────────────
 
-function isWorkDay(date, rotationOffset) {
+const TODAY_STR = format(new Date(), 'yyyy-MM-dd');
+
+/**
+ * Determines if a manager is scheduled to work on a given date.
+ *
+ * Supports two offset formats:
+ *   - Legacy numeric (0–6): cycle-based 5-on/2-off rotation from EPOCH
+ *   - New string "d1,d2" (e.g. "1,2" = Mon/Tue off): preferred days off
+ *
+ * Rules:
+ *   - Past dates (before today): always use legacy cycle behavior
+ *   - Today forward with string format: mark d1 and d2 as off days
+ *   - Peak/high-demand override: force work regardless of preference
+ */
+function isWorkDay(date, rotationOffset, dateStr = null, forceWork = false) {
+  // Peak/high-demand override — always work regardless of preference
+  if (forceWork) return true;
+
+  const ds = dateStr || format(date, 'yyyy-MM-dd');
+  const isPast = ds < TODAY_STR;
+
+  // New preferred days off format — only apply from today forward
+  if (!isPast && typeof rotationOffset === 'string' && /^\d,\d$/.test(rotationOffset)) {
+    const [d1, d2] = rotationOffset.split(',').map(Number);
+    const dow = getDay(date);
+    return dow !== d1 && dow !== d2;
+  }
+
+  // Legacy numeric cycle offset
+  const offset = typeof rotationOffset === 'number' ? rotationOffset : 0;
   const EPOCH = new Date('2026-01-05');
   const diffDays = Math.round((date - EPOCH) / (1000 * 60 * 60 * 24));
-  const cyclePos = ((diffDays + rotationOffset) % 7 + 7) % 7;
+  const cyclePos = ((diffDays + offset) % 7 + 7) % 7;
   return WORK_PATTERN[cyclePos] === 1;
 }
 
@@ -73,13 +102,16 @@ export function generateSchedule(members, startDate, endDate, settings = {}) {
   days.forEach((date) => {
     const dateStr = format(date, 'yyyy-MM-dd');
     const targets = getTargets(dateStr, settings);
+    const isPeakOrHigh = HARDCODED_PEAK_DAYS.has(dateStr) || HARDCODED_HIGH_DEMAND.has(dateStr);
 
     const working = [];
     const offMembers = [];
 
     members.forEach((m) => {
       const offset = m.rotationOffset ?? m.rotation_offset ?? 0;
-      if (isWorkDay(date, offset)) {
+      // On peak/high-demand days, force all managers to work (soft preference override)
+      const forceWork = isPeakOrHigh;
+      if (isWorkDay(date, offset, dateStr, forceWork)) {
         working.push(m);
       } else {
         offMembers.push(m);
@@ -241,12 +273,15 @@ export const generateRotation = (members, startDate, endDate, overrides = {}) =>
   days.forEach((date) => {
     const dk = getDateKey(date);
     const targets = getTargets(dk);
+    const isPeakOrHigh = HARDCODED_PEAK_DAYS.has(dk) || HARDCODED_HIGH_DEMAND.has(dk);
     const working = [];
     const offMembers = [];
 
     members.forEach((m) => {
-      const offset = m.rotationOffset ?? 0;
-      if (isWorkDay(date, offset)) {
+      const offset = m.rotationOffset ?? m.rotation_offset ?? 0;
+      // On peak/high-demand days, force all managers to work (soft preference override)
+      const forceWork = isPeakOrHigh;
+      if (isWorkDay(date, offset, dk, forceWork)) {
         working.push(m);
       } else {
         offMembers.push(m);
