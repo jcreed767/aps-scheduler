@@ -751,7 +751,10 @@ export default function App() {
                 <div className="upload-card">
                   <h3>Call Volume Forecast</h3>
                   <p className="upload-desc">Upload your YTD Total Calls Excel file to show daily forecast alongside the schedule.</p>
-                  <label className="upload-btn"><span>📂 Upload Forecast File</span><input type="file" accept=".xlsx,.xls,.csv" onChange={handleForecastUpload} ref={forecastRef} hidden/></label>
+                  <button className="upload-btn" onClick={()=>forecastRef.current?.click()}>
+                    <span>📂 Upload Forecast File</span>
+                  </button>
+                  <input type="file" accept=".xlsx,.xls,.csv" onChange={handleForecastUpload} ref={forecastRef} style={{display:'none'}}/>
                   {Object.keys(activeForecast).length>0 && <div className="upload-status success">✓ {Object.keys(activeForecast).length} days loaded</div>}
                 </div>
                 <div className="upload-card">
