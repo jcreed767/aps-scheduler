@@ -47,7 +47,8 @@ const TEAM_META = {
 // ─── Helpers ──────────────────────────────────────────────────
 function ShiftBadge({ shift }) {
   if (!shift || shift === 'OFF') return <span className="shift-badge shift-off">OFF</span>;
-  return <span className={`shift-badge shift-${shift.toLowerCase()}`}>{shift}</span>;
+  const label = SHIFT_LABELS[shift] || shift;
+  return <span className={`shift-badge shift-${shift.toLowerCase()}`}>{label}</span>;
 }
 
 function MemberAvatar({ name, size = 40 }) {
@@ -86,6 +87,13 @@ const SECTION_LABELS = {
   support: 'Support',
   config:  'Configuration',
 };
+
+// Support teams use local state only (pre-Supabase migration)
+const SUPPORT_TEAMS = ['admins','marketing','facilities','corporate'];
+
+// Shift display labels — internal values A/B/C are unchanged, only what's shown to users
+const SHIFT_LABELS = { A: '8am–4pm', B: '12pm–8pm', C: '2pm–10pm', OFF: 'OFF' };
+const SHIFT_OPTIONS = ['A','B','C','OFF'];
 
 // ─── MAIN APP ─────────────────────────────────────────────────
 export default function App() {
@@ -156,7 +164,31 @@ export default function App() {
     return result;
   }, [dbManualSchedule, members]);
 
-  const activeManualSchedules = dbManualAsLocal || manualSchedules;
+  // Merge DB manual schedules (ops teams) with local state (support teams + optimistic ops updates)
+  // Local state always wins for support teams; DB wins for ops teams unless local has newer data
+  const activeManualSchedules = useMemo(() => {
+    const base = { sales: {}, collections: {}, districts: {}, admins: {}, marketing: {}, facilities: {}, corporate: {} };
+    // Layer 1: DB data for ops teams
+    if (dbManualAsLocal) {
+      ['sales','collections','districts'].forEach(tk => {
+        base[tk] = dbManualAsLocal[tk] || {};
+      });
+    }
+    // Layer 2: local state — support teams always local; ops teams get local optimistic updates merged on top
+    Object.keys(manualSchedules).forEach(tk => {
+      const localTk = manualSchedules[tk] || {};
+      if (SUPPORT_TEAMS.includes(tk)) {
+        base[tk] = localTk;
+      } else {
+        // Merge local on top of DB for ops teams (captures optimistic updates)
+        Object.entries(localTk).forEach(([date, members]) => {
+          if (!base[tk][date]) base[tk][date] = {};
+          Object.assign(base[tk][date], members);
+        });
+      }
+    });
+    return base;
+  }, [dbManualAsLocal, manualSchedules]);
 
   const forecastRef = useRef();
   const hourlyRef   = useRef();
@@ -228,9 +260,6 @@ export default function App() {
     dbSetCCCell(managerId, dateKey, newShift);
     setEditCell(null);
   };
-
-  // ── Support teams use local state only (pre-Supabase migration) ──
-  const SUPPORT_TEAMS = ['admins','marketing','facilities','corporate'];
 
   // ── Manual schedule cell (sales/col/dl + support teams) ──
   const setManualCell = (teamKey, dateKey, memberId, val) => {
@@ -388,13 +417,13 @@ export default function App() {
   const handleExport = () => {
     if (!activeSchedule) return;
     const wb = XLSX.utils.book_new();
-    const gridRows = [['Date','Day','DOW',...activeTeams.callCenter.map(m=>m.name),'A','B','C','Total','Meets Target','Forecast']];
+    const gridRows = [['Date','Day','DOW',...activeTeams.callCenter.map(m=>m.name),'8am–4pm','12pm–8pm','2pm–10pm','Total','Meets Target','Forecast']];
     dates.forEach(date => {
       const dk = getDateKey(date); const ds = activeSchedule[dk]||{}; const cov = coverage[dk]||{};
       gridRows.push([dk,format(date,'MMM d'),DOW_LABELS[getDay(date)],...activeTeams.callCenter.map(m=>ds[m.id]||'OFF'),cov.counts?.A||0,cov.counts?.B||0,cov.counts?.C||0,cov.totalWorking||0,cov.meetsTarget?'Yes':'No',cov.forecastCalls||'']);
     });
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(gridRows), 'CC Schedule');
-    const sumRows = [['Manager','Role','Sites','Shift A','Shift B','Shift C','Total','Days Off']];
+    const sumRows = [['Manager','Role','Sites','8am–4pm','12pm–8pm','2pm–10pm','Total','Days Off']];
     managerSummary.forEach(s => {
       const m = activeTeams.callCenter.find(x=>x.id===s.id);
       sumRows.push([s.name,m?.role||'',m?.sites||'',s.A,s.B,s.C,s.total,s.OFF]);
@@ -557,7 +586,7 @@ export default function App() {
                             <span style={{fontSize:11,color:'var(--text-muted)'}}>{DOW_LABELS[getDay(date)]}</span>
                             <span className="gap-alert-desc">
                               {c.forecastCalls ? `${c.forecastCalls.toLocaleString()} calls · ` : ''}
-                              {c.counts ? `${c.counts.A}A/${c.counts.B}B/${c.counts.C}C (target ${c.target?.A}A/${c.target?.B}B/${c.target?.C}C)` : ''}
+                              {c.counts ? `${c.counts.A} early / ${c.counts.B} mid / ${c.counts.C} late (target ${c.target?.A}/${c.target?.B}/${c.target?.C})` : ''}
                             </span>
                             <span className={`gap-alert-badge ${c.isPeak?'badge-peak':c.isHighDemand?'badge-high':'badge-gap'}`}>
                               {c.isPeak ? 'PEAK' : c.isHighDemand ? 'HIGH' : 'GAP'}
@@ -650,9 +679,9 @@ export default function App() {
                               {m.name.split(' ')[0]}
                             </th>
                           ))}
-                          <th className="col-summary">A</th>
-                          <th className="col-summary">B</th>
-                          <th className="col-summary">C</th>
+                          <th className="col-summary" title="8am–4pm">8–4</th>
+                          <th className="col-summary" title="12pm–8pm">12–8</th>
+                          <th className="col-summary" title="2pm–10pm">2–10</th>
                           <th className="col-summary col-total">Tot</th>
                           <th className="col-forecast">Calls</th>
                         </tr>
@@ -681,7 +710,7 @@ export default function App() {
                                   <td key={m.id} className={`shift-cell shift-cell-${shift.toLowerCase()}`} onClick={()=>setEditCell({dk,mid:m.id})}>
                                     {isEditing
                                       ? <select autoFocus defaultValue={shift} onChange={e=>handleCellChange(dk,m.id,e.target.value)} onBlur={()=>setEditCell(null)} className="shift-select">
-                                          {['A','B','C','OFF'].map(s=><option key={s} value={s}>{s}</option>)}
+                                          {SHIFT_OPTIONS.map(s=><option key={s} value={s}>{SHIFT_LABELS[s]}</option>)}
                                         </select>
                                       : <ShiftBadge shift={shift}/>
                                     }
@@ -726,7 +755,7 @@ export default function App() {
                     ? <div className="all-clear">✅ All days meet coverage targets</div>
                     : (
                       <table className="data-table">
-                        <thead><tr><th>Date</th><th>DOW</th><th>Forecast</th><th>Shift A</th><th>Shift B</th><th>Shift C</th><th>Flag</th></tr></thead>
+                        <thead><tr><th>Date</th><th>DOW</th><th>Forecast</th><th>8am–4pm</th><th>12pm–8pm</th><th>2pm–10pm</th><th>Flag</th></tr></thead>
                         <tbody>
                           {Object.entries(coverage).filter(([,c])=>!c.meetsTarget).map(([dk,c])=>{
                             const date=parseISO(dk);
@@ -757,8 +786,8 @@ export default function App() {
                             <td>{format(date,'EEE, MMM d yyyy')}</td>
                             <td>{c.isPeak?'Peak':'High Demand'}</td>
                             <td>{c.forecastCalls?.toLocaleString()}</td>
-                            <td>{c.target.A}A / {c.target.B}B / {c.target.C}C</td>
-                            <td>{c.counts.A}A / {c.counts.B}B / {c.counts.C}C</td>
+                            <td>{c.target.A} early / {c.target.B} mid / {c.target.C} late</td>
+                            <td>{c.counts.A} early / {c.counts.B} mid / {c.counts.C} late</td>
                             <td><span className={`status-badge ${c.meetsTarget?'status-ok':'status-gap'}`}>{c.meetsTarget?'✓ Met':'✗ Gap'}</span></td>
                           </tr>
                         );
@@ -788,7 +817,7 @@ export default function App() {
               </div>
               {!isGenerated ? <p className="text-muted">Generate a schedule to see shift breakdowns.</p> : (
                 <table className="data-table">
-                  <thead><tr><th>Manager</th><th>Role</th><th>Sites</th><th>Shift A</th><th>Shift B</th><th>Shift C</th><th>Total Working</th><th>Days Off</th><th>Anchor</th></tr></thead>
+                  <thead><tr><th>Manager</th><th>Role</th><th>Sites</th><th>8am–4pm</th><th>12pm–8pm</th><th>2pm–10pm</th><th>Total Working</th><th>Days Off</th><th>Anchor</th></tr></thead>
                   <tbody>
                     {managerSummary.map(s=>{
                       const mgr=activeTeams.callCenter.find(m=>m.id===s.id);
@@ -852,9 +881,9 @@ export default function App() {
                     })}
                   </div>
                   <div className="chart-legend">
-                    <span className="legend-item"><span className="legend-dot dot-a"/>Shift A</span>
-                    <span className="legend-item"><span className="legend-dot dot-b"/>Shift A+B</span>
-                    <span className="legend-item"><span className="legend-dot dot-c"/>Shift B+C</span>
+                    <span className="legend-item"><span className="legend-dot dot-a"/>8am–4pm only</span>
+                    <span className="legend-item"><span className="legend-dot dot-b"/>8am–4pm + 12pm–8pm</span>
+                    <span className="legend-item"><span className="legend-dot dot-c"/>12pm–8pm + 2pm–10pm</span>
                   </div>
                 </div>
               )}
@@ -921,7 +950,7 @@ export default function App() {
                                     <option value="">–</option>
                                     {teamKey==='districts'
                                       ? ['ON','OFF','Travel','Meeting'].map(o=><option key={o} value={o}>{o}</option>)
-                                      : ['A','B','C','OFF'].map(o=><option key={o} value={o}>{o}</option>)
+                                      : SHIFT_OPTIONS.map(o=><option key={o} value={o}>{SHIFT_LABELS[o]}</option>)
                                     }
                                   </select>
                                 </td>
@@ -946,8 +975,6 @@ export default function App() {
             const members = activeTeams[teamKey] || [];
             const meta    = TEAM_META[teamKey];
             const manSch  = activeManualSchedules[teamKey] || {};
-            const isCorporate = teamKey === 'corporate';
-
             return (
               <div key={teamKey}>
                 <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20}}>
@@ -989,22 +1016,6 @@ export default function App() {
                             <td className={`dow-${DOW_LABELS[dow].toLowerCase()}`}>{DOW_LABELS[dow]}</td>
                             {members.map(m=>{
                               const val = manSch[dk]?.[m.id] || '';
-                              if (isCorporate) {
-                                return (
-                                  <td key={m.id}>
-                                    <select
-                                      className="inline-select"
-                                      value={val}
-                                      onChange={e=>setManualCell(teamKey,dk,m.id,e.target.value)}
-                                      style={{width:'100%'}}
-                                    >
-                                      <option value="">–</option>
-                                      {['ON','OFF','Travel','Meeting'].map(o=><option key={o} value={o}>{o}</option>)}
-                                    </select>
-                                  </td>
-                                );
-                              }
-                              // Free-text shift entry for Admins, Marketing, Facility Services
                               return (
                                 <td key={m.id}>
                                   <input
@@ -1023,11 +1034,7 @@ export default function App() {
                     </tbody>
                   </table>
                 </div>
-                <p className="grid-hint">
-                  {isCorporate
-                    ? 'Select status for each Corporate team member per day.'
-                    : 'Enter shift times or notes freely (e.g. 9am–5pm, Remote, Training).'}
-                </p>
+                <p className="grid-hint">Enter shift times or notes freely (e.g. 9am–5pm EST, Remote, Training, OFF).</p>
               </div>
             );
           })}
@@ -1083,7 +1090,8 @@ export default function App() {
                         <th>Name</th>
                         <th>Role</th>
                         <th>Sites Managed</th>
-                        {tk==='callCenter' && <><th>Shift Anchor</th><th>Rotation Offset</th></>}
+                        <th>Shift Anchor</th>
+                        {tk==='callCenter' && <th>Rotation Offset</th>}
                         <th></th>
                       </tr>
                     </thead>
@@ -1093,12 +1101,12 @@ export default function App() {
                           <td><input className="inline-input" value={getMemberValue(m,'name')} onChange={e=>updateMember(tk,m.id,'name',e.target.value)}/></td>
                           <td><input className="inline-input" value={getMemberValue(m,'role')} onChange={e=>updateMember(tk,m.id,'role',e.target.value)}/></td>
                           <td><input className="inline-input" style={{minWidth:200}} value={getMemberValue(m,'sites')} onChange={e=>updateMember(tk,m.id,'sites',e.target.value)} placeholder="Location 1, Location 2..."/></td>
-                          {tk==='callCenter' && (
+                          {tk==='callCenter' ? (
                             <>
                               <td>
                                 <select className="inline-select" value={getMemberValue(m,'shiftAnchor')} onChange={e=>updateMember(tk,m.id,'shiftAnchor',e.target.value||null)}>
                                   <option value="">Flexible</option>
-                                  {['A','B','C'].map(s=><option key={s} value={s}>Shift {s}</option>)}
+                                  {['A','B','C'].map(s=><option key={s} value={s}>{SHIFT_LABELS[s]}</option>)}
                                 </select>
                               </td>
                               <td>
@@ -1108,6 +1116,16 @@ export default function App() {
                                 </select>
                               </td>
                             </>
+                          ) : (
+                            <td>
+                              <input
+                                className="inline-input"
+                                value={getMemberValue(m,'shiftAnchor') || ''}
+                                onChange={e=>updateMember(tk,m.id,'shiftAnchor',e.target.value||null)}
+                                placeholder="e.g. 9am–5pm EST"
+                                style={{minWidth:140}}
+                              />
+                            </td>
                           )}
                           <td><button className="btn-icon" onClick={()=>removeMember(tk,m.id)}>✕</button></td>
                         </tr>
