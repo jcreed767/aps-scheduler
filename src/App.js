@@ -286,9 +286,17 @@ export default function App() {
     r.onload = evt => {
       let parsed;
       if (isCsv) {
-        // Parse CSV using XLSX
-        const wb = XLSX.read(evt.target.result, {type:'string'});
-        parsed = parseForecastFile(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]));
+        // Parse CSV: split into rows and columns manually
+        const text = evt.target.result;
+        const lines = text.split('\n').filter(l => l.trim());
+        const headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''));
+        const jsonRows = lines.slice(1).map(line => {
+          const vals = line.split(',').map(v => v.trim().replace(/^"|"$/g, ''));
+          const obj = {};
+          headers.forEach((h, i) => { obj[h] = vals[i] || ''; });
+          return obj;
+        });
+        parsed = parseForecastFile(jsonRows);
       } else {
         // Parse Excel binary
         const wb = XLSX.read(evt.target.result, {type:'binary'});
