@@ -80,6 +80,8 @@ export default function App() {
     members,
     ccSchedule: dbCCSchedule,
     manualSchedule: dbManualSchedule,
+    forecast: dbForecast,
+    spotlight: dbSpotlight,
     addMember: dbAddMember,
     updateMember: dbUpdateMember,
     removeMember: dbRemoveMember,
@@ -87,6 +89,8 @@ export default function App() {
     setManualCell: dbSetManualCell,
     clearManualCell: dbClearManualCell,
     regenerateSchedule: dbRegenerateSchedule,
+    uploadForecast: dbUploadForecast,
+    saveSpotlight: dbSaveSpotlight,
     loading,
   } = useApp();
 
@@ -105,6 +109,16 @@ export default function App() {
   const [motm, setMotm]             = useState({ name: '', role: '', photo: null });
   const [mascot, setMascot]         = useState(null);
   const [manualSchedules, setManualSchedules] = useState({ sales: {}, collections: {}, districts: {} });
+
+  // ── Merge DB forecast with local state ──
+  const activeForecast = (dbForecast && Object.keys(dbForecast).length > 0) ? dbForecast : forecastData;
+
+  // ── Merge DB spotlight with local motm state ──
+  const activeMotm = dbSpotlight ? {
+    name: dbSpotlight.team_members?.name || dbSpotlight.headline || motm.name,
+    role: dbSpotlight.body || motm.role,
+    photo: motm.photo, // photo stays local (base64)
+  } : motm;
 
   // ── Merge Supabase manual schedules with local state ──
   // dbManualSchedule format: { memberId: { date: { status, note } } }
@@ -178,8 +192,8 @@ export default function App() {
 
   const coverage = useMemo(() => {
     if (!activeSchedule) return {};
-    return analyzeCoverage(activeSchedule, activeTeams.callCenter, forecastData);
-  }, [activeSchedule, activeTeams.callCenter, forecastData]);
+    return analyzeCoverage(activeSchedule, activeTeams.callCenter, activeForecast);
+  }, [activeSchedule, activeTeams.callCenter, activeForecast]);
 
   const managerSummary = useMemo(() => {
     if (!activeSchedule) return [];
@@ -268,7 +282,17 @@ export default function App() {
   const handleForecastUpload = e => {
     const file = e.target.files[0]; if (!file) return;
     const r = new FileReader();
-    r.onload = evt => { const wb = XLSX.read(evt.target.result, {type:'binary'}); setForecast(parseForecastFile(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]))); };
+    r.onload = evt => {
+      const wb = XLSX.read(evt.target.result, {type:'binary'});
+      const parsed = parseForecastFile(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]));
+      setForecast(parsed);
+      // Persist to Supabase - convert object to array of rows
+      const rows = Object.entries(parsed).map(([forecast_date, data]) => ({
+        forecast_date,
+        ...data,
+      }));
+      if (rows.length > 0) dbUploadForecast(rows);
+    };
     r.readAsBinaryString(file);
   };
   const handleHourlyUpload = e => {
@@ -482,16 +506,16 @@ export default function App() {
                     <div className="spotlight-card">
                       <div className="spotlight-label">Team Member of the Month</div>
                       <label style={{cursor:'pointer'}} onClick={()=>motmRef.current?.click()}>
-                        {motm.photo
-                          ? <img src={motm.photo} alt="MOTM" className="spotlight-avatar" />
+                        {activeMotm.photo
+                          ? <img src={activeMotm.photo} alt="MOTM" className="spotlight-avatar" />
                           : <div className="spotlight-avatar-placeholder">🏆</div>
                         }
                       </label>
                       <input ref={motmRef} type="file" accept="image/*" onChange={handleMotmPhoto} hidden />
-                      {motm.name
+                      {activeMotm.name
                         ? <>
-                            <div className="spotlight-name">{motm.name}</div>
-                            <div className="spotlight-role">{motm.role}</div>
+                            <div className="spotlight-name">{activeMotm.name}</div>
+                            <div className="spotlight-role">{activeMotm.role}</div>
                           </>
                         : <input
                             className="inline-input"
@@ -728,7 +752,7 @@ export default function App() {
                   <h3>Call Volume Forecast</h3>
                   <p className="upload-desc">Upload your YTD Total Calls Excel file to show daily forecast alongside the schedule.</p>
                   <label className="upload-btn"><span>📂 Upload Forecast File</span><input type="file" accept=".xlsx,.xls,.csv" onChange={handleForecastUpload} ref={forecastRef} hidden/></label>
-                  {Object.keys(forecastData).length>0 && <div className="upload-status success">✓ {Object.keys(forecastData).length} days loaded</div>}
+                  {Object.keys(activeForecast).length>0 && <div className="upload-status success">✓ {Object.keys(activeForecast).length} days loaded</div>}
                 </div>
                 <div className="upload-card">
                   <h3>Hourly Distribution</h3>
@@ -851,11 +875,19 @@ export default function App() {
                 <div className="form-row" style={{gap:24,flexWrap:'wrap'}}>
                   <div className="form-group">
                     <label>Team Member of the Month – Name</label>
-                    <input className="form-input" value={motm.name} onChange={e=>setMotm(p=>({...p,name:e.target.value}))} placeholder="Full name" />
+                    <input className="form-input" value={motm.name} onChange={e=>{
+                      setMotm(p=>({...p,name:e.target.value}));
+                      const month = format(new Date(),'yyyy-MM');
+                      dbSaveSpotlight(month, null, e.target.value, motm.role);
+                    }} placeholder="Full name" />
                   </div>
                   <div className="form-group">
                     <label>Role / Achievement</label>
-                    <input className="form-input" value={motm.role} onChange={e=>setMotm(p=>({...p,role:e.target.value}))} placeholder="e.g. Site Manager · Q2 Top Performer" />
+                    <input className="form-input" value={motm.role} onChange={e=>{
+                      setMotm(p=>({...p,role:e.target.value}));
+                      const month = format(new Date(),'yyyy-MM');
+                      dbSaveSpotlight(month, null, motm.name, e.target.value);
+                    }} placeholder="e.g. Site Manager · Q2 Top Performer" />
                   </div>
                   <div className="form-group">
                     <label>Photo</label>
