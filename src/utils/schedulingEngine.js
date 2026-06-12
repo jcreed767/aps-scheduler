@@ -306,11 +306,18 @@ export const parseForecastFile = (data) => {
 
     if (!dateRaw) return;
 
-    // Parse natural language dates like "Thursday, January 1, 2026"
-    const parsed = new Date(dateRaw);
-    if (isNaN(parsed)) return;
+    let dk;
+    const dateStr = String(dateRaw).trim();
 
-    const dk = getDateKey(parsed);
+    // If already in YYYY-MM-DD format, use directly (avoids timezone shift)
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+      dk = dateStr;
+    } else {
+      // Parse natural language dates like "Thursday, January 1, 2026"
+      const parsed = new Date(dateStr);
+      if (isNaN(parsed)) return;
+      dk = getDateKey(parsed);
+    }
 
     const totalCalls =
       parseInt(
