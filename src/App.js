@@ -95,6 +95,17 @@ const SUPPORT_TEAMS = ['admins','marketing','facilities','corporate'];
 const SHIFT_LABELS = { A: '8am–4pm', B: '12pm–8pm', C: '2pm–10pm', OFF: 'OFF' };
 const SHIFT_OPTIONS = ['A','B','C','OFF'];
 
+// Preferred consecutive days off pairs for Site Managers
+const DAYS_OFF_PAIRS = [
+  { value: '0,1', label: 'Sun / Mon' },
+  { value: '1,2', label: 'Mon / Tue' },
+  { value: '2,3', label: 'Tue / Wed' },
+  { value: '3,4', label: 'Wed / Thu' },
+  { value: '4,5', label: 'Thu / Fri' },
+  { value: '5,6', label: 'Fri / Sat' },
+  { value: '6,0', label: 'Sat / Sun' },
+];
+
 // ─── MAIN APP ─────────────────────────────────────────────────
 export default function App() {
   // ── Supabase context ──
@@ -282,6 +293,24 @@ export default function App() {
   const [localEdits, setLocalEdits] = useState({});
   const saveTimers = useRef({});
 
+  // ── Auto-populate schedule from shift anchor for non-CC teams ──
+  const applyAnchorToSchedule = useCallback((teamKey, memberId, anchorValue) => {
+    if (!anchorValue) return;
+    setManualSchedules(p => {
+      const teamSch = { ...(p[teamKey] || {}) };
+      dates.forEach(date => {
+        const dow = getDay(date);
+        if (dow === 0 || dow === 6) return; // skip weekends
+        const dk = getDateKey(date);
+        const existing = teamSch[dk]?.[memberId] || '';
+        if (existing) return; // don't overwrite manual entries
+        if (!teamSch[dk]) teamSch[dk] = {};
+        teamSch[dk] = { ...teamSch[dk], [memberId]: anchorValue };
+      });
+      return { ...p, [teamKey]: teamSch };
+    });
+  }, [dates]);
+
   // ── Team updaters (optimistic local + debounced Supabase save) ──
   const updateMember = (teamKey, id, field, value) => {
     if (SUPPORT_TEAMS.includes(teamKey)) {
@@ -289,6 +318,8 @@ export default function App() {
         ...p,
         [teamKey]: (p[teamKey] || []).map(m => m.id === id ? { ...m, [field]: value } : m),
       }));
+      // Auto-populate schedule when shift anchor is set for support teams
+      if (field === 'shiftAnchor' && value) applyAnchorToSchedule(teamKey, id, value);
       return;
     }
     // 1. Update local buffer immediately so input feels responsive
@@ -306,6 +337,10 @@ export default function App() {
                     : field;
       dbUpdateMember(id, { [dbField]: value });
     }, 500);
+    // Auto-populate schedule when shift anchor is set for non-CC ops teams
+    if (field === 'shiftAnchor' && value && teamKey !== 'callCenter') {
+      applyAnchorToSchedule(teamKey, id, value);
+    }
   };
 
   const addMember = (teamKey, role) => {
@@ -556,7 +591,9 @@ export default function App() {
                                 <MemberAvatar name={m.name} size={22} />
                                 {m.name.split(' ')[0]}
                                 {m.shift && m.shift !== 'ON' && (
-                                  <span className={`chip-shift shift-${m.shift.toLowerCase()}`}>{m.shift}</span>
+                                  <span className={`chip-shift shift-${(SHIFT_LABELS[m.shift] ? m.shift : 'x').toLowerCase()}`}>
+                                    {SHIFT_LABELS[m.shift] || m.shift}
+                                  </span>
                                 )}
                               </div>
                             ))
@@ -815,29 +852,66 @@ export default function App() {
                   </div>
                 ))}
               </div>
-              {!isGenerated ? <p className="text-muted">Generate a schedule to see shift breakdowns.</p> : (
-                <table className="data-table">
-                  <thead><tr><th>Manager</th><th>Role</th><th>Sites</th><th>8am–4pm</th><th>12pm–8pm</th><th>2pm–10pm</th><th>Total Working</th><th>Days Off</th><th>Anchor</th></tr></thead>
-                  <tbody>
-                    {managerSummary.map(s=>{
-                      const mgr=activeTeams.callCenter.find(m=>m.id===s.id);
-                      return (
-                        <tr key={s.id}>
-                          <td className="font-bold">{s.name}</td>
-                          <td className="text-muted">{mgr?.role}</td>
-                          <td className="text-muted" style={{fontSize:11}}>{mgr?.sites||'–'}</td>
-                          <td><span className="shift-count shift-count-a">{s.A}</span></td>
-                          <td><span className="shift-count shift-count-b">{s.B}</span></td>
-                          <td><span className="shift-count shift-count-c">{s.C}</span></td>
-                          <td className="font-bold">{s.total}</td>
-                          <td className="text-muted">{s.OFF}</td>
-                          <td>{mgr?.shiftAnchor || mgr?.shift_anchor ? <ShiftBadge shift={mgr.shiftAnchor || mgr.shift_anchor}/> : <span className="text-muted">Flex</span>}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              )}
+              {!isGenerated ? <p className="text-muted">Generate a schedule to see shift breakdowns.</p> : (() => {
+                // Compute max consecutive working days per manager
+                const fatigueMap = {};
+                activeTeams.callCenter.forEach(m => {
+                  let maxRun = 0, currentRun = 0;
+                  dates.forEach(date => {
+                    const dk = getDateKey(date);
+                    const shift = activeSchedule?.[dk]?.[m.id];
+                    if (shift && shift !== 'OFF') {
+                      currentRun++;
+                      if (currentRun > maxRun) maxRun = currentRun;
+                    } else {
+                      currentRun = 0;
+                    }
+                  });
+                  fatigueMap[m.id] = maxRun;
+                });
+                return (
+                  <table className="data-table">
+                    <thead><tr><th>Manager</th><th>Role</th><th>Sites</th><th>8am–4pm</th><th>12pm–8pm</th><th>2pm–10pm</th><th>Total Working</th><th>Days Off</th><th>Anchor</th><th>Pref. Days Off</th><th>⚠</th></tr></thead>
+                    <tbody>
+                      {managerSummary.map(s=>{
+                        const mgr=activeTeams.callCenter.find(m=>m.id===s.id);
+                        const maxConsec = fatigueMap[s.id] || 0;
+                        const fatigued = maxConsec > 7;
+                        return (
+                          <tr key={s.id} style={fatigued ? {background:'#FFF3CD',borderLeft:'3px solid #E6B43E'} : {}}>
+                            <td className="font-bold">{s.name}</td>
+                            <td className="text-muted">{mgr?.role}</td>
+                            <td className="text-muted" style={{fontSize:11}}>{mgr?.sites||'–'}</td>
+                            <td><span className="shift-count shift-count-a">{s.A}</span></td>
+                            <td><span className="shift-count shift-count-b">{s.B}</span></td>
+                            <td><span className="shift-count shift-count-c">{s.C}</span></td>
+                            <td className="font-bold">{s.total}</td>
+                            <td className="text-muted">{s.OFF}</td>
+                            <td>
+                              {mgr?.shiftAnchor || mgr?.shift_anchor
+                                ? <ShiftBadge shift={mgr.shiftAnchor || mgr.shift_anchor}/>
+                                : <span className="text-muted">Flex</span>}
+                            </td>
+                            <td className="text-muted" style={{fontSize:11}}>
+                              {(() => {
+                                const val = getMemberValue(mgr || {}, 'rotationOffset');
+                                if (!val) return '–';
+                                const pair = DAYS_OFF_PAIRS.find(p => p.value === String(val));
+                                return pair ? pair.label : val;
+                              })()}
+                            </td>
+                            <td>
+                              {fatigued
+                                ? <span className="fatigue-badge" title={`${maxConsec} consecutive working days`}>⚠ {maxConsec}d</span>
+                                : <span className="text-muted">–</span>}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                );
+              })()}
             </div>
           )}
 
@@ -941,18 +1015,13 @@ export default function App() {
                               const val = manSch[dk]?.[m.id] || '';
                               return (
                                 <td key={m.id}>
-                                  <select
-                                    className="inline-select"
+                                  <input
+                                    className="inline-input shift-freetext"
                                     value={val}
                                     onChange={e=>setManualCell(teamKey,dk,m.id,e.target.value)}
-                                    style={{width:'100%'}}
-                                  >
-                                    <option value="">–</option>
-                                    {teamKey==='districts'
-                                      ? ['ON','OFF','Travel','Meeting'].map(o=><option key={o} value={o}>{o}</option>)
-                                      : SHIFT_OPTIONS.map(o=><option key={o} value={o}>{SHIFT_LABELS[o]}</option>)
-                                    }
-                                  </select>
+                                    placeholder="–"
+                                    style={{width:'100%',minWidth:110}}
+                                  />
                                 </td>
                               );
                             })}
@@ -1091,7 +1160,7 @@ export default function App() {
                         <th>Role</th>
                         <th>Sites Managed</th>
                         <th>Shift Anchor</th>
-                        {tk==='callCenter' && <th>Rotation Offset</th>}
+                        {tk==='callCenter' && <th>Preferred Days Off</th>}
                         <th></th>
                       </tr>
                     </thead>
@@ -1110,9 +1179,9 @@ export default function App() {
                                 </select>
                               </td>
                               <td>
-                                <select className="inline-select" value={getMemberValue(m,'rotationOffset')} onChange={e=>updateMember(tk,m.id,'rotationOffset',e.target.value!==''?Number(e.target.value):undefined)}>
-                                  <option value="">Auto</option>
-                                  {[0,1,2,3,4,5,6].map(n=><option key={n} value={n}>Day {n}</option>)}
+                                <select className="inline-select" value={getMemberValue(m,'rotationOffset') ?? ''} onChange={e=>updateMember(tk,m.id,'rotationOffset',e.target.value!==''?e.target.value:undefined)}>
+                                  <option value="">No preference</option>
+                                  {DAYS_OFF_PAIRS.map(p=><option key={p.value} value={p.value}>{p.label}</option>)}
                                 </select>
                               </td>
                             </>
