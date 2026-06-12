@@ -100,13 +100,21 @@ function reducer(state, action) {
 
     case 'REMOVE_MEMBER': {
       const { id, team } = action;
-      return {
-        ...state,
-        members: {
-          ...state.members,
-          [team]: state.members[team].filter((m) => m.id !== id),
-        },
-      };
+      // Guard against undefined team arrays
+      // Also handle both 'callcenter' (Supabase) and other team keys
+      const updatedMembers = { ...state.members };
+      // Try direct key first
+      if (updatedMembers[team]) {
+        updatedMembers[team] = updatedMembers[team].filter((m) => m.id !== id);
+      } else {
+        // Search all teams for this member id
+        Object.keys(updatedMembers).forEach(t => {
+          if (Array.isArray(updatedMembers[t])) {
+            updatedMembers[t] = updatedMembers[t].filter((m) => m.id !== id);
+          }
+        });
+      }
+      return { ...state, members: updatedMembers };
     }
 
     case 'SET_CC_SCHEDULE': {
