@@ -288,14 +288,42 @@ export const getManagerSummary = (schedule, members) => {
 
 export const parseForecastFile = (data) => {
   const result = {};
+
+  // IVR drop-off rates by day-of-month (DOM 1-5 have higher IVR payment rates)
+  // Based on APS actuals: DOM 1-5 ~24-30% IVR, rest of month ~13.4%
+  const getIvrRate = (date) => {
+    const dom = new Date(date).getDate();
+    if (dom === 1) return 0.30;
+    if (dom <= 5) return 0.27;
+    return 0.134;
+  };
+
   data.forEach((row) => {
-    const dateKey = row.date || row.Date || row.DATE;
-    if (!dateKey) return;
-    const dk = getDateKey(dateKey);
+    // Support both native format and APS export format
+    const dateRaw =
+      row.date || row.Date || row.DATE ||
+      row['Started At: Day'] || row['started_at_day'];
+
+    if (!dateRaw) return;
+
+    // Parse natural language dates like "Thursday, January 1, 2026"
+    const parsed = new Date(dateRaw);
+    if (isNaN(parsed)) return;
+
+    const dk = getDateKey(parsed);
+
+    const totalCalls =
+      parseInt(row.total_calls || row['Total Calls'] || row.totalCalls || row.Count || row.count || 0);
+
+    // Use provided agent_calls if available, otherwise apply IVR strip
+    const agentCalls =
+      parseInt(row.agent_calls || row['Agent Calls'] || row.agentCalls || 0) ||
+      Math.round(totalCalls * (1 - getIvrRate(dk)));
+
     result[dk] = {
-      agent_calls: row.agent_calls || row['Agent Calls'] || row.agentCalls || 0,
-      total_calls: row.total_calls || row['Total Calls'] || row.totalCalls || 0,
-      totalCalls:  row.total_calls || row['Total Calls'] || row.totalCalls || 0,
+      total_calls: totalCalls,
+      totalCalls: totalCalls,
+      agent_calls: agentCalls,
     };
   });
   return result;
@@ -303,8 +331,12 @@ export const parseForecastFile = (data) => {
 
 export const parseHourlyFile = (data) => {
   return data.map((row) => ({
-    hour: row.hour || row.Hour || row.TIME || '',
-    callsPerDay: parseFloat(row.callsPerDay || row['Calls Per Day'] || row.calls || 0),
+    // Support both native format and APS export format
+    hour: row.hour || row.Hour || row.TIME || row['Started At: Hour of day'] || '',
+    callsPerDay: parseFloat(
+      row.callsPerDay || row['Calls Per Day'] || row['Calls per Day'] ||
+      row.calls || row.Count || 0
+    ),
   })).filter((r) => r.callsPerDay > 0);
 };
 
