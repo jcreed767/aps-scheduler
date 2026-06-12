@@ -23,17 +23,25 @@ const mkManagers = (n, role, team) =>
   }));
 
 const INIT_STATE = {
-  callCenter:  mkManagers(14, 'Site Manager', 'cc'),
-  sales:       mkManagers(3,  'Sales Rep',    'sales'),
-  collections: mkManagers(4,  'Collections',  'col'),
+  callCenter:  mkManagers(14, 'Site Manager',    'cc'),
+  sales:       mkManagers(3,  'Sales Rep',       'sales'),
+  collections: mkManagers(4,  'Collections',     'col'),
   districts:   mkManagers(3,  'District Leader', 'dl'),
+  admins:      mkManagers(2,  'Admin',           'admins'),
+  marketing:   mkManagers(3,  'Marketing',       'marketing'),
+  facilities:  mkManagers(4,  'Facility Svc',    'facilities'),
+  corporate:   mkManagers(2,  'Corporate',       'corporate'),
 };
 
 const TEAM_META = {
-  callCenter:  { label: 'Call Center',      color: '#4F8EF7', dot: '#4F8EF7', icon: '📞' },
-  sales:       { label: 'Sales Team',       color: '#34D399', dot: '#34D399', icon: '💼' },
-  collections: { label: 'Collections',      color: '#F87171', dot: '#F87171', icon: '📋' },
-  districts:   { label: 'District Leaders', color: '#E6B43E', dot: '#E6B43E', icon: '⭐' },
+  callCenter:  { label: 'Call Center',       color: '#4F8EF7', dot: '#4F8EF7', icon: '📞' },
+  sales:       { label: 'Sales Team',        color: '#34D399', dot: '#34D399', icon: '💼' },
+  collections: { label: 'Collections',       color: '#F87171', dot: '#F87171', icon: '📋' },
+  districts:   { label: 'District Leaders',  color: '#E6B43E', dot: '#E6B43E', icon: '⭐' },
+  admins:      { label: 'Admins',            color: '#A78BFA', dot: '#A78BFA', icon: '🗂️' },
+  marketing:   { label: 'Marketing',         color: '#F472B6', dot: '#F472B6', icon: '📣' },
+  facilities:  { label: 'Facility Services', color: '#6EE7B7', dot: '#6EE7B7', icon: '🏢' },
+  corporate:   { label: 'Corporate',         color: '#94A3B8', dot: '#94A3B8', icon: '🏛️' },
 };
 
 // ─── Helpers ──────────────────────────────────────────────────
@@ -53,24 +61,30 @@ function MemberAvatar({ name, size = 40 }) {
 
 // ─── NAV ITEMS ────────────────────────────────────────────────
 const NAV = [
+  // Overview
   { id: 'dashboard',   label: 'Dashboard',        icon: '⬛', section: 'main' },
-  { id: 'cc-schedule', label: 'Schedule Grid',     icon: '📅', section: 'cc' },
-  { id: 'cc-coverage', label: 'Coverage Analysis', icon: '📊', section: 'cc' },
-  { id: 'cc-summary',  label: 'Manager Summary',   icon: '👥', section: 'cc' },
-  { id: 'cc-forecast', label: 'Forecast & Data',   icon: '📈', section: 'cc' },
-  { id: 'sales',       label: 'Sales Team',        icon: '💼', section: 'sales' },
-  { id: 'collections', label: 'Collections',       icon: '📋', section: 'col' },
-  { id: 'districts',   label: 'District Leaders',  icon: '⭐', section: 'dl' },
+  // Ops
+  { id: 'cc-schedule', label: 'Site Managers',     icon: '📅', section: 'ops' },
+  { id: 'cc-coverage', label: 'Coverage Analysis', icon: '📊', section: 'ops' },
+  { id: 'cc-summary',  label: 'Manager Summary',   icon: '👥', section: 'ops' },
+  { id: 'cc-forecast', label: 'Forecast & Data',   icon: '📈', section: 'ops' },
+  { id: 'sales',       label: 'Sales Team',        icon: '💼', section: 'ops' },
+  { id: 'collections', label: 'Collections',       icon: '📋', section: 'ops' },
+  { id: 'districts',   label: 'District Leaders',  icon: '⭐', section: 'ops' },
+  // Support
+  { id: 'admins',      label: 'Admins',            icon: '🗂️', section: 'support' },
+  { id: 'marketing',   label: 'Marketing',         icon: '📣', section: 'support' },
+  { id: 'facilities',  label: 'Facility Services', icon: '🏢', section: 'support' },
+  { id: 'corporate',   label: 'Corporate',         icon: '🏛️', section: 'support' },
+  // Config
   { id: 'settings',    label: 'Settings',          icon: '⚙️',  section: 'config' },
 ];
 
 const SECTION_LABELS = {
-  main:   'Overview',
-  cc:     'Call Center',
-  sales:  'Sales Team',
-  col:    'Collections',
-  dl:     'District Leaders',
-  config: 'Configuration',
+  main:    'Overview',
+  ops:     'Ops',
+  support: 'Support',
+  config:  'Configuration',
 };
 
 // ─── MAIN APP ─────────────────────────────────────────────────
@@ -108,7 +122,7 @@ export default function App() {
   const [viewMode, setViewMode]     = useState('today');
   const [motm, setMotm]             = useState({ name: '', role: '', photo: null });
   const [mascot, setMascot]         = useState(null);
-  const [manualSchedules, setManualSchedules] = useState({ sales: {}, collections: {}, districts: {} });
+  const [manualSchedules, setManualSchedules] = useState({ sales: {}, collections: {}, districts: {}, admins: {}, marketing: {}, facilities: {}, corporate: {} });
 
   // ── Merge DB forecast with local state ──
   const activeForecast = (dbForecast && Object.keys(dbForecast).length > 0) ? dbForecast : forecastData;
@@ -125,10 +139,10 @@ export default function App() {
   // App expects: { teamKey: { date: { memberId: status } } }
   const dbManualAsLocal = useMemo(() => {
     if (!dbManualSchedule || Object.keys(dbManualSchedule).length === 0) return null;
-    const result = { sales: {}, collections: {}, districts: {} };
+    const result = { sales: {}, collections: {}, districts: {}, admins: {}, marketing: {}, facilities: {}, corporate: {} };
     // Build a memberId -> teamKey lookup
     const memberTeamMap = {};
-    ['sales','collections','districts'].forEach(tk => {
+    ['sales','collections','districts','admins','marketing','facilities','corporate'].forEach(tk => {
       (members[tk] || []).forEach(m => { memberTeamMap[m.id] = tk; });
     });
     Object.entries(dbManualSchedule).forEach(([memberId, dates]) => {
@@ -156,6 +170,11 @@ export default function App() {
     sales:       members.sales       || [],
     collections: members.collections || [],
     districts:   members.districts   || [],
+    // Support teams — local state only until Supabase migration
+    admins:      teams.admins      || [],
+    marketing:   teams.marketing   || [],
+    facilities:  teams.facilities  || [],
+    corporate:   teams.corporate   || [],
   };
   const activeTeams = !loading.members ? teamsFromDB : teams;
 
@@ -210,14 +229,19 @@ export default function App() {
     setEditCell(null);
   };
 
-  // ── Manual schedule cell (sales/col/dl) ──
+  // ── Support teams use local state only (pre-Supabase migration) ──
+  const SUPPORT_TEAMS = ['admins','marketing','facilities','corporate'];
+
+  // ── Manual schedule cell (sales/col/dl + support teams) ──
   const setManualCell = (teamKey, dateKey, memberId, val) => {
     // Optimistic local update
     setManualSchedules(p => ({
       ...p,
-      [teamKey]: { ...p[teamKey], [dateKey]: { ...(p[teamKey][dateKey]||{}), [memberId]: val }}
+      [teamKey]: { ...p[teamKey], [dateKey]: { ...(p[teamKey]?.[dateKey]||{}), [memberId]: val }}
     }));
-    // Persist to Supabase
+    // Support teams are local-only — skip Supabase
+    if (SUPPORT_TEAMS.includes(teamKey)) return;
+    // Persist to Supabase for ops teams
     if (val === '' || val === null) {
       dbClearManualCell(memberId, dateKey);
     } else {
@@ -231,6 +255,13 @@ export default function App() {
 
   // ── Team updaters (optimistic local + debounced Supabase save) ──
   const updateMember = (teamKey, id, field, value) => {
+    if (SUPPORT_TEAMS.includes(teamKey)) {
+      setTeams(p => ({
+        ...p,
+        [teamKey]: (p[teamKey] || []).map(m => m.id === id ? { ...m, [field]: value } : m),
+      }));
+      return;
+    }
     // 1. Update local buffer immediately so input feels responsive
     setLocalEdits(p => ({
       ...p,
@@ -249,6 +280,20 @@ export default function App() {
   };
 
   const addMember = (teamKey, role) => {
+    if (SUPPORT_TEAMS.includes(teamKey)) {
+      const newMember = {
+        id: `${teamKey}-${Date.now()}`,
+        name: `New ${role}`,
+        role,
+        team: teamKey,
+        sites: '',
+        shiftAnchor: null,
+        rotationOffset: undefined,
+        unavailable: [],
+      };
+      setTeams(p => ({ ...p, [teamKey]: [...(p[teamKey] || []), newMember] }));
+      return;
+    }
     const teamMap = { callCenter: 'callcenter', sales: 'sales', collections: 'collections', districts: 'districts' };
     dbAddMember({
       name: `New ${role}`,
@@ -262,6 +307,10 @@ export default function App() {
   };
 
   const removeMember = (teamKey, id) => {
+    if (SUPPORT_TEAMS.includes(teamKey)) {
+      setTeams(p => ({ ...p, [teamKey]: (p[teamKey] || []).filter(m => m.id !== id) }));
+      return;
+    }
     // Clear any pending saves for this member
     Object.keys(saveTimers.current).forEach(k => {
       if (k.startsWith(id)) clearTimeout(saveTimers.current[k]);
@@ -371,9 +420,8 @@ export default function App() {
       const ds = schedule?.[dateKey] || {};
       return activeTeams.callCenter.filter(m => ds[m.id] && ds[m.id] !== 'OFF').map(m => ({ ...m, shift: ds[m.id] }));
     }
-    const teamKey2 = teamKey === 'sales' ? 'sales' : teamKey === 'collections' ? 'collections' : 'districts';
-    const ms = activeManualSchedules[teamKey2]?.[dateKey] || {};
-    return activeTeams[teamKey].filter(m => ms[m.id] && ms[m.id] !== 'OFF').map(m => ({ ...m, shift: ms[m.id] }));
+    const ms = activeManualSchedules[teamKey]?.[dateKey] || {};
+    return (activeTeams[teamKey] || []).filter(m => ms[m.id] && ms[m.id] !== 'OFF' && ms[m.id] !== '').map(m => ({ ...m, shift: ms[m.id] }));
   }
 
   // ── Loading state ──
@@ -460,7 +508,7 @@ export default function App() {
                   <div className="dash-card-title">
                     <span>Team Coverage – {viewMode === 'today' ? format(new Date(),'MMM d') : viewMode === 'tomorrow' ? format(addDays(new Date(),1),'MMM d') : viewMode}</span>
                   </div>
-                  {(['callCenter','sales','collections','districts']).map(tk => {
+                  {(['callCenter','sales','collections','districts','admins','marketing','facilities','corporate']).map(tk => {
                     const dk = viewMode === 'tomorrow' ? tomorrow : today;
                     const onShift = getDaySnapshot(dk, tk);
                     const meta = TEAM_META[tk];
@@ -563,7 +611,7 @@ export default function App() {
               </div>
 
               <div className="stats-row">
-                <div className="stat-card"><div className="stat-value">{activeTeams.callCenter.length + activeTeams.sales.length + activeTeams.collections.length + activeTeams.districts.length}</div><div className="stat-label">Total Team Members</div></div>
+                <div className="stat-card"><div className="stat-value">{activeTeams.callCenter.length + activeTeams.sales.length + activeTeams.collections.length + activeTeams.districts.length + activeTeams.admins.length + activeTeams.marketing.length + activeTeams.facilities.length + activeTeams.corporate.length}</div><div className="stat-label">Total Team Members</div></div>
                 <div className="stat-card good"><div className="stat-value">{generated ? Object.values(coverage).filter(c=>c.meetsTarget).length : '–'}</div><div className="stat-label">Days Meeting Target</div></div>
                 <div className="stat-card warn"><div className="stat-value">{generated ? Object.values(coverage).filter(c=>!c.meetsTarget).length : '–'}</div><div className="stat-label">Coverage Gaps</div></div>
                 <div className="stat-card peak"><div className="stat-value">{Object.keys(PEAK_DAYS).length}</div><div className="stat-label">Peak Days</div></div>
@@ -813,7 +861,7 @@ export default function App() {
             </div>
           )}
 
-          {/* SALES / COLLECTIONS / DISTRICT LEADERS */}
+          {/* OPS TEAMS: SALES / COLLECTIONS / DISTRICT LEADERS */}
           {['sales','collections','districts'].map(teamKey => {
             const roleMap  = { sales:'Sales Rep', collections:'Collections', districts:'District Leader' };
             const pageMap  = { sales:'sales', collections:'collections', districts:'districts' };
@@ -890,6 +938,100 @@ export default function App() {
             );
           })}
 
+          {/* SUPPORT TEAMS: ADMINS / MARKETING / FACILITY SERVICES / CORPORATE */}
+          {['admins','marketing','facilities','corporate'].map(teamKey => {
+            if (page !== teamKey) return null;
+
+            const roleMap = { admins:'Admin', marketing:'Marketing', facilities:'Facility Svc', corporate:'Corporate' };
+            const members = activeTeams[teamKey] || [];
+            const meta    = TEAM_META[teamKey];
+            const manSch  = activeManualSchedules[teamKey] || {};
+            const isCorporate = teamKey === 'corporate';
+
+            return (
+              <div key={teamKey}>
+                <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20}}>
+                  <h2 className="section-title" style={{margin:0}}>{meta.icon} {meta.label}</h2>
+                  <button className="btn btn-secondary btn-sm" onClick={()=>addMember(teamKey, roleMap[teamKey])}>+ Add Member</button>
+                </div>
+
+                <div className="member-cards-grid">
+                  {members.map(m=>(
+                    <div className="member-card" key={m.id}>
+                      <MemberAvatar name={m.name} />
+                      <div className="member-info">
+                        <div className="member-name">{m.name}</div>
+                        <div className="member-role">{m.role}</div>
+                        {m.sites && <div className="member-sites">{m.sites}</div>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <h3 className="subsection-title">Schedule – {format(parseISO(startDate),'MMM d')} to {format(parseISO(endDate),'MMM d, yyyy')}</h3>
+                <div className="manual-grid-scroll">
+                  <table className="manual-table">
+                    <thead>
+                      <tr>
+                        <th style={{minWidth:90}}>Date</th>
+                        <th style={{minWidth:44}}>DOW</th>
+                        {members.map(m=><th key={m.id} style={{minWidth:130}}>{m.name.split(' ').slice(0,2).join(' ')}</th>)}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {dates.map(date=>{
+                        const dk=getDateKey(date);
+                        const dow=getDay(date);
+                        const isWknd=dow===0||dow===6;
+                        return (
+                          <tr key={dk} className={isWknd?'row-weekend':''}>
+                            <td style={{fontWeight:500}}>{format(date,'MMM d')}</td>
+                            <td className={`dow-${DOW_LABELS[dow].toLowerCase()}`}>{DOW_LABELS[dow]}</td>
+                            {members.map(m=>{
+                              const val = manSch[dk]?.[m.id] || '';
+                              if (isCorporate) {
+                                return (
+                                  <td key={m.id}>
+                                    <select
+                                      className="inline-select"
+                                      value={val}
+                                      onChange={e=>setManualCell(teamKey,dk,m.id,e.target.value)}
+                                      style={{width:'100%'}}
+                                    >
+                                      <option value="">–</option>
+                                      {['ON','OFF','Travel','Meeting'].map(o=><option key={o} value={o}>{o}</option>)}
+                                    </select>
+                                  </td>
+                                );
+                              }
+                              // Free-text shift entry for Admins, Marketing, Facility Services
+                              return (
+                                <td key={m.id}>
+                                  <input
+                                    className="inline-input shift-freetext"
+                                    value={val}
+                                    onChange={e=>setManualCell(teamKey,dk,m.id,e.target.value)}
+                                    placeholder="–"
+                                    style={{width:'100%',minWidth:110}}
+                                  />
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <p className="grid-hint">
+                  {isCorporate
+                    ? 'Select status for each Corporate team member per day.'
+                    : 'Enter shift times or notes freely (e.g. 9am–5pm, Remote, Training).'}
+                </p>
+              </div>
+            );
+          })}
+
           {/* SETTINGS */}
           {page === 'settings' && (
             <div>
@@ -925,6 +1067,10 @@ export default function App() {
                 sales:       { label: 'Sales Team',                  role: 'Sales Rep' },
                 collections: { label: 'Collections Team',            role: 'Collections' },
                 districts:   { label: 'District Leaders',            role: 'District Leader' },
+                admins:      { label: 'Admins',                      role: 'Admin' },
+                marketing:   { label: 'Marketing',                   role: 'Marketing' },
+                facilities:  { label: 'Facility Services',           role: 'Facility Svc' },
+                corporate:   { label: 'Corporate',                   role: 'Corporate' },
               }).map(([tk, meta]) => (
                 <div className="settings-section" key={tk}>
                   <div className="section-header-row">
