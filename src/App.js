@@ -305,14 +305,14 @@ export default function App() {
     if (isCsv) {
       r.readAsText(file);
     } else {
-      r.readAsBinaryString(file);
+      if (isCsv) { r.readAsText(file); } else { r.readAsBinaryString(file); }
     }
   };
   const handleHourlyUpload = e => {
     const file = e.target.files[0]; if (!file) return;
     const r = new FileReader();
     r.onload = evt => { const wb = XLSX.read(evt.target.result, {type:'binary'}); setHourly(parseHourlyFile(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]))); };
-    r.readAsBinaryString(file);
+    if (isCsv) { r.readAsText(file); } else { r.readAsBinaryString(file); }
   };
   const handleMotmPhoto = e => {
     const file = e.target.files[0]; if (!file) return;
