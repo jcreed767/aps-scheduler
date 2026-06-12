@@ -79,10 +79,13 @@ export default function App() {
   const {
     members,
     ccSchedule: dbCCSchedule,
+    manualSchedule: dbManualSchedule,
     addMember: dbAddMember,
     updateMember: dbUpdateMember,
     removeMember: dbRemoveMember,
     setCCCell: dbSetCCCell,
+    setManualCell: dbSetManualCell,
+    clearManualCell: dbClearManualCell,
     regenerateSchedule: dbRegenerateSchedule,
     loading,
   } = useApp();
@@ -102,6 +105,30 @@ export default function App() {
   const [motm, setMotm]             = useState({ name: '', role: '', photo: null });
   const [mascot, setMascot]         = useState(null);
   const [manualSchedules, setManualSchedules] = useState({ sales: {}, collections: {}, districts: {} });
+
+  // ── Merge Supabase manual schedules with local state ──
+  // dbManualSchedule format: { memberId: { date: { status, note } } }
+  // App expects: { teamKey: { date: { memberId: status } } }
+  const dbManualAsLocal = useMemo(() => {
+    if (!dbManualSchedule || Object.keys(dbManualSchedule).length === 0) return null;
+    const result = { sales: {}, collections: {}, districts: {} };
+    // Build a memberId -> teamKey lookup
+    const memberTeamMap = {};
+    ['sales','collections','districts'].forEach(tk => {
+      (members[tk] || []).forEach(m => { memberTeamMap[m.id] = tk; });
+    });
+    Object.entries(dbManualSchedule).forEach(([memberId, dates]) => {
+      const tk = memberTeamMap[memberId];
+      if (!tk) return;
+      Object.entries(dates).forEach(([date, entry]) => {
+        if (!result[tk][date]) result[tk][date] = {};
+        result[tk][date][memberId] = entry.status || '';
+      });
+    });
+    return result;
+  }, [dbManualSchedule, members]);
+
+  const activeManualSchedules = dbManualAsLocal || manualSchedules;
 
   const forecastRef = useRef();
   const hourlyRef   = useRef();
@@ -171,10 +198,17 @@ export default function App() {
 
   // ── Manual schedule cell (sales/col/dl) ──
   const setManualCell = (teamKey, dateKey, memberId, val) => {
+    // Optimistic local update
     setManualSchedules(p => ({
       ...p,
       [teamKey]: { ...p[teamKey], [dateKey]: { ...(p[teamKey][dateKey]||{}), [memberId]: val }}
     }));
+    // Persist to Supabase
+    if (val === '' || val === null) {
+      dbClearManualCell(memberId, dateKey);
+    } else {
+      dbSetManualCell(memberId, dateKey, val);
+    }
   };
 
   // ── Local edits buffer (optimistic UI for text inputs) ──
@@ -293,7 +327,7 @@ export default function App() {
       return activeTeams.callCenter.filter(m => ds[m.id] && ds[m.id] !== 'OFF').map(m => ({ ...m, shift: ds[m.id] }));
     }
     const teamKey2 = teamKey === 'sales' ? 'sales' : teamKey === 'collections' ? 'collections' : 'districts';
-    const ms = manualSchedules[teamKey2]?.[dateKey] || {};
+    const ms = activeManualSchedules[teamKey2]?.[dateKey] || {};
     return activeTeams[teamKey].filter(m => ms[m.id] && ms[m.id] !== 'OFF').map(m => ({ ...m, shift: ms[m.id] }));
   }
 
@@ -739,7 +773,7 @@ export default function App() {
 
             const members  = activeTeams[teamKey];
             const meta     = TEAM_META[teamKey];
-            const manSch   = manualSchedules[teamKey];
+            const manSch   = activeManualSchedules[teamKey] || {};
 
             return (
               <div key={teamKey}>
