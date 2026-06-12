@@ -109,14 +109,14 @@ export default function App() {
   const mascotRef   = useRef();
 
   // ── Merge Supabase members with local fallback ──
+  // Once loading is complete, always use DB data (even if empty after deletes)
   const teamsFromDB = {
     callCenter:  members.callcenter  || [],
     sales:       members.sales       || [],
     collections: members.collections || [],
     districts:   members.districts   || [],
   };
-  const hasDBData = teamsFromDB.callCenter.length > 0 || teamsFromDB.sales.length > 0;
-  const activeTeams = hasDBData ? teamsFromDB : teams;
+  const activeTeams = !loading.members ? teamsFromDB : teams;
 
   const dates = useMemo(() => getAllDates(startDate, endDate), [startDate, endDate]);
 
