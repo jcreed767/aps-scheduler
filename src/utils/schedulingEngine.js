@@ -283,6 +283,14 @@ export const generateRotation = (members, startDate, endDate, overrides = {}) =>
   const days = getAllDates(startDate, endDate);
   const result = {};
 
+  // DEBUG — remove after validation
+  console.log('[generateRotation] members rotation offsets:', members.map(m => ({
+    name: m.name,
+    rotationOffset: m.rotationOffset,
+    rotation_offset: m.rotation_offset,
+    resolved: m.rotationOffset ?? m.rotation_offset ?? 0,
+  })));
+
   days.forEach((date) => {
     const dk = getDateKey(date);
     const targets = getTargets(dk);
