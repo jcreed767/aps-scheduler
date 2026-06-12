@@ -313,20 +313,26 @@ export default function App() {
 
   // ── Team updaters (optimistic local + debounced Supabase save) ──
   const updateMember = (teamKey, id, field, value) => {
-    if (SUPPORT_TEAMS.includes(teamKey)) {
-      setTeams(p => ({
-        ...p,
-        [teamKey]: (p[teamKey] || []).map(m => m.id === id ? { ...m, [field]: value } : m),
-      }));
-      // Auto-populate schedule when shift anchor is set for support teams
-      if (field === 'shiftAnchor' && value) applyAnchorToSchedule(teamKey, id, value);
-      return;
-    }
-    // 1. Update local buffer immediately so input feels responsive
+    // 1. Always update local edit buffer immediately for responsive inputs
     setLocalEdits(p => ({
       ...p,
       [id]: { ...(p[id] || {}), [field]: value }
     }));
+
+    if (SUPPORT_TEAMS.includes(teamKey)) {
+      // Debounce the teams state write for support teams
+      const timerKey = `${id}_${field}`;
+      if (saveTimers.current[timerKey]) clearTimeout(saveTimers.current[timerKey]);
+      saveTimers.current[timerKey] = setTimeout(() => {
+        setTeams(p => ({
+          ...p,
+          [teamKey]: (p[teamKey] || []).map(m => m.id === id ? { ...m, [field]: value } : m),
+        }));
+        // Auto-populate schedule when shift anchor is set for support teams
+        if (field === 'shiftAnchor' && value) applyAnchorToSchedule(teamKey, id, value);
+      }, 500);
+      return;
+    }
 
     // 2. Debounce the Supabase write (500ms after last keystroke)
     const timerKey = `${id}_${field}`;
@@ -372,6 +378,11 @@ export default function App() {
 
   const removeMember = (teamKey, id) => {
     if (SUPPORT_TEAMS.includes(teamKey)) {
+      // Cancel any pending debounced saves
+      Object.keys(saveTimers.current).forEach(k => {
+        if (k.startsWith(id)) clearTimeout(saveTimers.current[k]);
+      });
+      setLocalEdits(p => { const n = {...p}; delete n[id]; return n; });
       setTeams(p => ({ ...p, [teamKey]: (p[teamKey] || []).filter(m => m.id !== id) }));
       return;
     }
@@ -1160,7 +1171,7 @@ export default function App() {
                         <th>Role</th>
                         <th>Sites Managed</th>
                         <th>Shift Anchor</th>
-                        {tk==='callCenter' && <th>Preferred Days Off</th>}
+                        <th>Preferred Days Off</th>
                         <th></th>
                       </tr>
                     </thead>
@@ -1186,15 +1197,23 @@ export default function App() {
                               </td>
                             </>
                           ) : (
-                            <td>
-                              <input
-                                className="inline-input"
-                                value={getMemberValue(m,'shiftAnchor') || ''}
-                                onChange={e=>updateMember(tk,m.id,'shiftAnchor',e.target.value||null)}
-                                placeholder="e.g. 9am–5pm EST"
-                                style={{minWidth:140}}
-                              />
-                            </td>
+                            <>
+                              <td>
+                                <input
+                                  className="inline-input"
+                                  value={getMemberValue(m,'shiftAnchor') || ''}
+                                  onChange={e=>updateMember(tk,m.id,'shiftAnchor',e.target.value||null)}
+                                  placeholder="e.g. 9am–5pm EST"
+                                  style={{minWidth:140}}
+                                />
+                              </td>
+                              <td>
+                                <select className="inline-select" value={getMemberValue(m,'rotationOffset') ?? ''} onChange={e=>updateMember(tk,m.id,'rotationOffset',e.target.value!==''?e.target.value:undefined)}>
+                                  <option value="">No preference</option>
+                                  {DAYS_OFF_PAIRS.map(p=><option key={p.value} value={p.value}>{p.label}</option>)}
+                                </select>
+                              </td>
+                            </>
                           )}
                           <td><button className="btn-icon" onClick={()=>removeMember(tk,m.id)}>✕</button></td>
                         </tr>
