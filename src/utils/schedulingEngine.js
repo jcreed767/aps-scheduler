@@ -313,11 +313,17 @@ export const parseForecastFile = (data) => {
     const dk = getDateKey(parsed);
 
     const totalCalls =
-      parseInt(row.total_calls || row['Total Calls'] || row.totalCalls || row.Count || row.count || 0);
+      parseInt(
+        row.total_calls || row['Total Calls'] || row.totalCalls ||
+        row['Raw Inbound Calls'] || row.Count || row.count || 0
+      );
 
     // Use provided agent_calls if available, otherwise apply IVR strip
     const agentCalls =
-      parseInt(row.agent_calls || row['Agent Calls'] || row.agentCalls || 0) ||
+      parseInt(
+        row.agent_calls || row['Agent Calls'] || row.agentCalls ||
+        row['True Agent Calls'] || 0
+      ) ||
       Math.round(totalCalls * (1 - getIvrRate(dk)));
 
     result[dk] = {
