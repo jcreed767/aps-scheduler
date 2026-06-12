@@ -328,7 +328,7 @@ export default function App() {
           ...p,
           [teamKey]: (p[teamKey] || []).map(m => m.id === id ? { ...m, [field]: value } : m),
         }));
-        // Auto-populate schedule when shift anchor is set for support teams
+        // Auto-populate schedule when shift anchor is set — fires once after typing stops
         if (field === 'shiftAnchor' && value) applyAnchorToSchedule(teamKey, id, value);
       }, 500);
       return;
@@ -342,11 +342,11 @@ export default function App() {
                     : field === 'rotationOffset' ? 'rotation_offset'
                     : field;
       dbUpdateMember(id, { [dbField]: value });
+      // Auto-populate schedule when shift anchor is set — fires once after typing stops
+      if (field === 'shiftAnchor' && value && teamKey !== 'callCenter') {
+        applyAnchorToSchedule(teamKey, id, value);
+      }
     }, 500);
-    // Auto-populate schedule when shift anchor is set for non-CC ops teams
-    if (field === 'shiftAnchor' && value && teamKey !== 'callCenter') {
-      applyAnchorToSchedule(teamKey, id, value);
-    }
   };
 
   const addMember = (teamKey, role) => {
@@ -1202,7 +1202,7 @@ export default function App() {
                                 <input
                                   className="inline-input"
                                   value={getMemberValue(m,'shiftAnchor') || ''}
-                                  onChange={e=>updateMember(tk,m.id,'shiftAnchor',e.target.value||null)}
+                                  onChange={e=>updateMember(tk,m.id,'shiftAnchor',e.target.value)}
                                   placeholder="e.g. 9am–5pm EST"
                                   style={{minWidth:140}}
                                 />
