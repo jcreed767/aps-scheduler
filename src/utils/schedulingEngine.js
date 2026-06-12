@@ -68,21 +68,23 @@ const PREF_DAYS_OFF = {
  *   - Peak/high-demand override: force work regardless of preference
  */
 function isWorkDay(date, rotationOffset, dateStr = null, forceWork = false) {
-  // Peak/high-demand override — always work regardless of preference
   if (forceWork) return true;
 
   const ds = dateStr || format(date, 'yyyy-MM-dd');
   const isPast = ds < TODAY_STR;
   const offset = Number(rotationOffset);
 
-  // New preferred days off format — only apply from today forward
+  // DEBUG — remove after validation
+  if (ds === '2026-06-15' || ds === '2026-06-16') {
+    console.log(`[isWorkDay] date=${ds} TODAY=${TODAY_STR} isPast=${isPast} offset=${offset} PREF=${JSON.stringify(PREF_DAYS_OFF[offset])} dow=${getDay(date)}`);
+  }
+
   if (!isPast && PREF_DAYS_OFF[offset]) {
     const [d1, d2] = PREF_DAYS_OFF[offset];
     const dow = getDay(date);
     return dow !== d1 && dow !== d2;
   }
 
-  // Legacy numeric cycle offset (0–6)
   const legacyOffset = (!isNaN(offset) && offset >= 0 && offset <= 6) ? offset : 0;
   const EPOCH = new Date('2026-01-05');
   const diffDays = Math.round((date - EPOCH) / (1000 * 60 * 60 * 24));
