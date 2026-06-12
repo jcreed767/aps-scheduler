@@ -281,19 +281,32 @@ export default function App() {
   // ── File uploads ──
   const handleForecastUpload = e => {
     const file = e.target.files[0]; if (!file) return;
+    const isCsv = file.name.toLowerCase().endsWith('.csv');
     const r = new FileReader();
     r.onload = evt => {
-      const wb = XLSX.read(evt.target.result, {type:'binary'});
-      const parsed = parseForecastFile(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]));
+      let parsed;
+      if (isCsv) {
+        // Parse CSV using XLSX
+        const wb = XLSX.read(evt.target.result, {type:'string'});
+        parsed = parseForecastFile(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]));
+      } else {
+        // Parse Excel binary
+        const wb = XLSX.read(evt.target.result, {type:'binary'});
+        parsed = parseForecastFile(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]));
+      }
       setForecast(parsed);
-      // Persist to Supabase - convert object to array of rows
+      // Persist to Supabase
       const rows = Object.entries(parsed).map(([forecast_date, data]) => ({
         forecast_date,
         ...data,
       }));
       if (rows.length > 0) dbUploadForecast(rows);
     };
-    r.readAsBinaryString(file);
+    if (isCsv) {
+      r.readAsText(file);
+    } else {
+      r.readAsBinaryString(file);
+    }
   };
   const handleHourlyUpload = e => {
     const file = e.target.files[0]; if (!file) return;
