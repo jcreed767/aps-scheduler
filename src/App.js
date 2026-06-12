@@ -95,15 +95,17 @@ const SUPPORT_TEAMS = ['admins','marketing','facilities','corporate'];
 const SHIFT_LABELS = { A: '8am–4pm', B: '12pm–8pm', C: '2pm–10pm', OFF: 'OFF' };
 const SHIFT_OPTIONS = ['A','B','C','OFF'];
 
-// Preferred consecutive days off pairs for Site Managers
+// Preferred days off pairs — stored as integers 10–16 to avoid collision with
+// legacy rotation offsets (0–6) and survive Supabase integer column round-trip.
+// Engine decodes: value >= 10 → pair index → two day-of-week integers.
 const DAYS_OFF_PAIRS = [
-  { value: '0,1', label: 'Sun / Mon' },
-  { value: '1,2', label: 'Mon / Tue' },
-  { value: '2,3', label: 'Tue / Wed' },
-  { value: '3,4', label: 'Wed / Thu' },
-  { value: '4,5', label: 'Thu / Fri' },
-  { value: '5,6', label: 'Fri / Sat' },
-  { value: '6,0', label: 'Sat / Sun' },
+  { value: 10, label: 'Sun / Mon', days: [0, 1] },
+  { value: 11, label: 'Mon / Tue', days: [1, 2] },
+  { value: 12, label: 'Tue / Wed', days: [2, 3] },
+  { value: 13, label: 'Wed / Thu', days: [3, 4] },
+  { value: 14, label: 'Thu / Fri', days: [4, 5] },
+  { value: 15, label: 'Fri / Sat', days: [5, 6] },
+  { value: 16, label: 'Sat / Sun', days: [6, 0] },
 ];
 
 // ─── MAIN APP ─────────────────────────────────────────────────
@@ -906,9 +908,9 @@ export default function App() {
                             <td className="text-muted" style={{fontSize:11}}>
                               {(() => {
                                 const val = getMemberValue(mgr || {}, 'rotationOffset');
-                                if (!val) return '–';
-                                const pair = DAYS_OFF_PAIRS.find(p => p.value === String(val));
-                                return pair ? pair.label : val;
+                                if (!val && val !== 0) return '–';
+                                const pair = DAYS_OFF_PAIRS.find(p => p.value === Number(val));
+                                return pair ? pair.label : '–';
                               })()}
                             </td>
                             <td>
@@ -1190,7 +1192,7 @@ export default function App() {
                                 </select>
                               </td>
                               <td>
-                                <select className="inline-select" value={getMemberValue(m,'rotationOffset') ?? ''} onChange={e=>updateMember(tk,m.id,'rotationOffset',e.target.value!==''?e.target.value:undefined)}>
+                                <select className="inline-select" value={getMemberValue(m,'rotationOffset') ?? ''} onChange={e=>updateMember(tk,m.id,'rotationOffset',e.target.value!==''?Number(e.target.value):undefined)}>
                                   <option value="">No preference</option>
                                   {DAYS_OFF_PAIRS.map(p=><option key={p.value} value={p.value}>{p.label}</option>)}
                                 </select>
@@ -1208,7 +1210,7 @@ export default function App() {
                                 />
                               </td>
                               <td>
-                                <select className="inline-select" value={getMemberValue(m,'rotationOffset') ?? ''} onChange={e=>updateMember(tk,m.id,'rotationOffset',e.target.value!==''?e.target.value:undefined)}>
+                                <select className="inline-select" value={getMemberValue(m,'rotationOffset') ?? ''} onChange={e=>updateMember(tk,m.id,'rotationOffset',e.target.value!==''?Number(e.target.value):undefined)}>
                                   <option value="">No preference</option>
                                   {DAYS_OFF_PAIRS.map(p=><option key={p.value} value={p.value}>{p.label}</option>)}
                                 </select>

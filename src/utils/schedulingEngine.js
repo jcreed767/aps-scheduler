@@ -43,16 +43,28 @@ export const HIGH_DEMAND_DAYS = {
 
 const TODAY_STR = format(new Date(), 'yyyy-MM-dd');
 
+// Preferred days off lookup — mirrors DAYS_OFF_PAIRS in App.js
+// Integer 10–16 encodes consecutive day pairs, safe for Supabase integer column
+const PREF_DAYS_OFF = {
+  10: [0, 1], // Sun / Mon
+  11: [1, 2], // Mon / Tue
+  12: [2, 3], // Tue / Wed
+  13: [3, 4], // Wed / Thu
+  14: [4, 5], // Thu / Fri
+  15: [5, 6], // Fri / Sat
+  16: [6, 0], // Sat / Sun
+};
+
 /**
  * Determines if a manager is scheduled to work on a given date.
  *
  * Supports two offset formats:
  *   - Legacy numeric (0–6): cycle-based 5-on/2-off rotation from EPOCH
- *   - New string "d1,d2" (e.g. "1,2" = Mon/Tue off): preferred days off
+ *   - Preferred days off (10–16): two specific days of week always off
  *
  * Rules:
  *   - Past dates (before today): always use legacy cycle behavior
- *   - Today forward with string format: mark d1 and d2 as off days
+ *   - Today forward with value 10–16: mark the two encoded days as off
  *   - Peak/high-demand override: force work regardless of preference
  */
 function isWorkDay(date, rotationOffset, dateStr = null, forceWork = false) {
@@ -61,19 +73,20 @@ function isWorkDay(date, rotationOffset, dateStr = null, forceWork = false) {
 
   const ds = dateStr || format(date, 'yyyy-MM-dd');
   const isPast = ds < TODAY_STR;
+  const offset = Number(rotationOffset);
 
   // New preferred days off format — only apply from today forward
-  if (!isPast && typeof rotationOffset === 'string' && /^\d,\d$/.test(rotationOffset)) {
-    const [d1, d2] = rotationOffset.split(',').map(Number);
+  if (!isPast && PREF_DAYS_OFF[offset]) {
+    const [d1, d2] = PREF_DAYS_OFF[offset];
     const dow = getDay(date);
     return dow !== d1 && dow !== d2;
   }
 
-  // Legacy numeric cycle offset
-  const offset = typeof rotationOffset === 'number' ? rotationOffset : 0;
+  // Legacy numeric cycle offset (0–6)
+  const legacyOffset = (!isNaN(offset) && offset >= 0 && offset <= 6) ? offset : 0;
   const EPOCH = new Date('2026-01-05');
   const diffDays = Math.round((date - EPOCH) / (1000 * 60 * 60 * 24));
-  const cyclePos = ((diffDays + offset) % 7 + 7) % 7;
+  const cyclePos = ((diffDays + legacyOffset) % 7 + 7) % 7;
   return WORK_PATTERN[cyclePos] === 1;
 }
 
