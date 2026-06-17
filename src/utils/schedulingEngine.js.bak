@@ -74,6 +74,11 @@ function isWorkDay(date, rotationOffset, dateStr = null, forceWork = false) {
   const isPast = ds < TODAY_STR;
   const offset = Number(rotationOffset);
 
+  // DEBUG — remove after validation
+  if (ds === '2026-06-15' || ds === '2026-06-16') {
+    console.log(`[isWorkDay] date=${ds} TODAY=${TODAY_STR} isPast=${isPast} offset=${offset} PREF=${JSON.stringify(PREF_DAYS_OFF[offset])} dow=${getDay(date)}`);
+  }
+
   if (!isPast && PREF_DAYS_OFF[offset]) {
     const [d1, d2] = PREF_DAYS_OFF[offset];
     const dow = getDay(date);
@@ -101,120 +106,6 @@ export const getDateKey = (date) => format(new Date(date), 'yyyy-MM-dd');
 export const getAllDates = (startDate, endDate) =>
   eachDayOfInterval({ start: new Date(startDate), end: new Date(endDate) });
 
-// ─── Override Ranking ────────────────────────────────────────
-
-/**
- * Override-priority ranking — "who gets their schedule changed first
- * when all things are equal."
- *
- * Used to decide which managers are pulled in from a preferred day off
- * to cover a peak / high-demand day. The LEAST-burdened member ranks
- * first (changed first); the MOST-burdened member ranks last (most
- * likely to keep their preferred day off).
- *
- * Ordering (ascending position = changed first):
- *   1. fewest days worked so far     — load balancing
- *   2. shortest current consecutive streak — fatigue avoidance
- *   3. name A→Z                      — stable, deterministic tie-break
- *   4. id A→Z                        — final deterministic tie-break
- *
- * Pure & deterministic: identical input always yields identical order,
- * independent of the incoming array order.
- *
- * @param {Array}  members  members eligible to be reordered
- * @param {Object} stats    { [memberId]: { worked, consec } } as of "now"
- * @returns {Array} new array, sorted by override priority
- */
-export function rankMembers(members, stats = {}) {
-  const statOf = (id) => stats[id] || { worked: 0, consec: 0 };
-  return [...(members || [])].sort((a, b) => {
-    const sa = statOf(a.id);
-    const sb = statOf(b.id);
-    if ((sa.worked || 0) !== (sb.worked || 0)) return (sa.worked || 0) - (sb.worked || 0);
-    if ((sa.consec || 0) !== (sb.consec || 0)) return (sa.consec || 0) - (sb.consec || 0);
-    const na = String(a.name || '').toLowerCase();
-    const nb = String(b.name || '').toLowerCase();
-    if (na !== nb) return na < nb ? -1 : 1;
-    const ia = String(a.id);
-    const ib = String(b.id);
-    return ia < ib ? -1 : ia > ib ? 1 : 0;
-  });
-}
-
-// ─── Shared per-day resolution ───────────────────────────────
-
-/**
- * Resolve who works (and on which shift) for a single date.
- *
- * Shared by BOTH generateSchedule (Supabase rows) and generateRotation
- * (legacy display map) so the persisted schedule and the on-screen
- * schedule can never diverge.
- *
- * `stats` reflects days BEFORE this date and is read-only here; the
- * caller is responsible for updating it after the day is resolved.
- *
- * Peak / high-demand behavior:
- *   - settings.smart_peak_override !== true  → legacy: FORCE all to work.
- *   - settings.smart_peak_override === true   → preserve preferred days
- *     off where coverage allows. Pull in only the deficit needed to hit
- *     the day's target, choosing the least-burdened members first
- *     (via rankMembers). The most-burdened keep their day off.
- *
- * @returns {{ assignments: Array<{member, shift}>, offMembers: Array }}
- */
-export function resolveDayAssignments(members, date, dateStr, settings = {}, stats = {}) {
-  const targets = getTargets(dateStr, settings);
-  const totalNeeded = SHIFTS.reduce((sum, s) => sum + (targets[s] || 0), 0);
-
-  const isForcedDay =
-    HARDCODED_PEAK_DAYS.has(dateStr) ||
-    HARDCODED_HIGH_DEMAND.has(dateStr) ||
-    (settings.peak_days || []).includes(dateStr) ||
-    (settings.high_demand_days || []).includes(dateStr);
-
-  const smartOverride = settings.smart_peak_override === true;
-
-  // 1. Baseline — honor each member's preference (no force).
-  const naturallyWorking = [];
-  const wantOff = [];
-  (members || []).forEach((m) => {
-    const offset = m.rotationOffset ?? m.rotation_offset ?? 0;
-    if (isWorkDay(date, offset, dateStr, false)) {
-      naturallyWorking.push(m);
-    } else {
-      wantOff.push(m);
-    }
-  });
-
-  let working = [...naturallyWorking];
-  let offMembers = [];
-
-  if (isForcedDay) {
-    if (smartOverride) {
-      // Preserve preferred days off where coverage still allows it.
-      const deficit = totalNeeded - working.length;
-      if (deficit > 0) {
-        const ranked = rankMembers(wantOff, stats); // least-burdened first
-        working = working.concat(ranked.slice(0, deficit));
-        offMembers = ranked.slice(deficit);
-      } else {
-        // Coverage already met by preference-respecting set — everyone
-        // who wanted the day off keeps it.
-        offMembers = wantOff;
-      }
-    } else {
-      // Legacy behavior: force ALL managers to work on forced days.
-      working = [...(members || [])];
-      offMembers = [];
-    }
-  } else {
-    offMembers = wantOff;
-  }
-
-  const assignments = assignShifts(working, targets);
-  return { assignments, offMembers };
-}
-
 // ─── Main Generator ──────────────────────────────────────────
 
 export function generateSchedule(members, startDate, endDate, settings = {}) {
@@ -223,28 +114,34 @@ export function generateSchedule(members, startDate, endDate, settings = {}) {
   const days = eachDayOfInterval({ start: startDate, end: endDate });
   const rows = [];
 
-  // Running per-member stats power the override ranking. Seeded to 0 so
-  // load-balancing is deterministic and fair from day one of the range.
-  const stats = {};
-  members.forEach((m) => { stats[m.id] = { worked: 0, consec: 0 }; });
-  const bump = (id, didWork) => {
-    const st = stats[id] || (stats[id] = { worked: 0, consec: 0 });
-    if (didWork) { st.worked += 1; st.consec += 1; }
-    else { st.consec = 0; }
-  };
-
   days.forEach((date) => {
     const dateStr = format(date, 'yyyy-MM-dd');
-    const { assignments, offMembers } = resolveDayAssignments(members, date, dateStr, settings, stats);
+    const targets = getTargets(dateStr, settings);
+    const isPeakOrHigh = HARDCODED_PEAK_DAYS.has(dateStr) || HARDCODED_HIGH_DEMAND.has(dateStr);
 
-    assignments.forEach(({ member, shift }) => {
+    const working = [];
+    const offMembers = [];
+
+    members.forEach((m) => {
+      const offset = m.rotationOffset ?? m.rotation_offset ?? 0;
+      // On peak/high-demand days, force all managers to work (soft preference override)
+      const forceWork = isPeakOrHigh;
+      if (isWorkDay(date, offset, dateStr, forceWork)) {
+        working.push(m);
+      } else {
+        offMembers.push(m);
+      }
+    });
+
+    const assigned = assignShifts(working, targets);
+
+    assigned.forEach(({ member, shift }) => {
       rows.push({
         member_id: member.id,
         schedule_date: dateStr,
         shift,
         is_override: false,
       });
-      bump(member.id, true);
     });
 
     offMembers.forEach((m) => {
@@ -254,7 +151,6 @@ export function generateSchedule(members, startDate, endDate, settings = {}) {
         shift: 'OFF',
         is_override: false,
       });
-      bump(m.id, false);
     });
   });
 
@@ -385,32 +281,44 @@ export function analyzeCoverage(scheduleOrDateStr, membersOrIds, forecastOrSched
 
 // ─── Legacy exports (App.js compatibility) ───────────────────
 
-export const generateRotation = (members, startDate, endDate, overrides = {}, settings = {}) => {
+export const generateRotation = (members, startDate, endDate, overrides = {}) => {
   const days = getAllDates(startDate, endDate);
   const result = {};
 
-  // Mirror generateSchedule's running stats so the displayed schedule
-  // makes the SAME override-ranking decisions as the persisted one.
-  const stats = {};
-  (members || []).forEach((m) => { stats[m.id] = { worked: 0, consec: 0 }; });
-  const bump = (id, didWork) => {
-    const st = stats[id] || (stats[id] = { worked: 0, consec: 0 });
-    if (didWork) { st.worked += 1; st.consec += 1; }
-    else { st.consec = 0; }
-  };
+  // DEBUG — remove after validation
+  console.log('[generateRotation] members rotation offsets:', members.map(m => ({
+    name: m.name,
+    rotationOffset: m.rotationOffset,
+    rotation_offset: m.rotation_offset,
+    resolved: m.rotationOffset ?? m.rotation_offset ?? 0,
+  })));
 
   days.forEach((date) => {
     const dk = getDateKey(date);
-    const { assignments, offMembers } = resolveDayAssignments(members, date, dk, settings, stats);
+    const targets = getTargets(dk);
+    const isPeakOrHigh = HARDCODED_PEAK_DAYS.has(dk) || HARDCODED_HIGH_DEMAND.has(dk);
+    const working = [];
+    const offMembers = [];
+
+    members.forEach((m) => {
+      const offset = m.rotationOffset ?? m.rotation_offset ?? 0;
+      // On peak/high-demand days, force all managers to work (soft preference override)
+      const forceWork = isPeakOrHigh;
+      if (isWorkDay(date, offset, dk, forceWork)) {
+        working.push(m);
+      } else {
+        offMembers.push(m);
+      }
+    });
+
+    const assigned = assignShifts(working, targets);
     result[dk] = {};
 
-    assignments.forEach(({ member, shift }) => {
+    assigned.forEach(({ member, shift }) => {
       result[dk][member.id] = overrides[dk]?.[member.id] || shift;
-      bump(member.id, true);
     });
     offMembers.forEach((m) => {
       result[dk][m.id] = overrides[dk]?.[m.id] || 'OFF';
-      bump(m.id, false);
     });
   });
 

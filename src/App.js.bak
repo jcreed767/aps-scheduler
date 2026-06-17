@@ -126,8 +126,6 @@ export default function App() {
     regenerateSchedule: dbRegenerateSchedule,
     uploadForecast: dbUploadForecast,
     saveSpotlight: dbSaveSpotlight,
-    settings,
-    saveSetting: dbSaveSetting,
     loading,
   } = useApp();
 
@@ -247,14 +245,14 @@ export default function App() {
 
   // ── Generate CC schedule ──
   const handleGenerate = useCallback(() => {
-    const s = generateRotation(activeTeams.callCenter, startDate, endDate, overrides, settings);
+    const s = generateRotation(activeTeams.callCenter, startDate, endDate, overrides);
     setSchedule(s);
     setGenerated(true);
-    // Persist to Supabase — pass current members directly to avoid stale context state
+    // Also persist to Supabase
     const start = new Date(startDate);
     const end = new Date(endDate);
-    dbRegenerateSchedule(start, end, activeTeams.callCenter);
-  }, [activeTeams.callCenter, startDate, endDate, overrides, settings, dbRegenerateSchedule]);
+    dbRegenerateSchedule(start, end);
+  }, [activeTeams.callCenter, startDate, endDate, overrides, dbRegenerateSchedule]);
 
   const coverage = useMemo(() => {
     if (!activeSchedule) return {};
@@ -1127,31 +1125,6 @@ export default function App() {
           {page === 'settings' && (
             <div>
               <h2 className="section-title">Settings</h2>
-
-              <div className="settings-section">
-                <h3>Scheduling Engine</h3>
-                <div className="form-row" style={{alignItems:'flex-start',gap:12}}>
-                  <label style={{display:'flex',alignItems:'flex-start',gap:10,cursor:'pointer',maxWidth:640}}>
-                    <input
-                      type="checkbox"
-                      checked={!!settings?.smart_peak_override}
-                      onChange={e=>dbSaveSetting('smart_peak_override', e.target.checked)}
-                      style={{marginTop:3,width:16,height:16,flexShrink:0}}
-                    />
-                    <span>
-                      <strong>Smart peak-day override</strong> — preserve preferred days off where coverage allows.
-                      <br/>
-                      <span style={{fontSize:12,color:'var(--text-muted)'}}>
-                        When ON, peak / high-demand days pull in only enough managers to hit the
-                        staffing target, choosing the least-burdened first (fairest to override).
-                        When OFF (default), every manager is forced to work peak / high-demand days.
-                        Re-generate the Call Center schedule after changing this.
-                      </span>
-                    </span>
-                  </label>
-                </div>
-              </div>
-
               <div className="settings-section">
                 <h3>Team Spotlights</h3>
                 <div className="form-row" style={{gap:24,flexWrap:'wrap'}}>
