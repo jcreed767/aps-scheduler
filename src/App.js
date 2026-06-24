@@ -5,8 +5,7 @@ import { format, parseISO, getDay, addDays } from 'date-fns';
 import {
   generateRotation, analyzeCoverage, getManagerSummary,
   getAllDates, getDateKey, DOW_LABELS,
-  parseForecastFile, parseHourlyFile,
-  PEAK_DAYS, HIGH_DEMAND_DAYS,
+  parseForecastFile, parseHourlyFile, deriveShiftWeights,
 } from './utils/schedulingEngine';
 
 // ─── Inline Logo ──────────────────────────────────────────────
@@ -163,6 +162,15 @@ export default function App() {
   // ── Merge DB forecast with local state ──
   const activeForecast = (dbForecast && Object.keys(dbForecast).length > 0) ? dbForecast : forecastData;
 
+  // Schedule range follows the loaded forecast (so a new month's file extends
+  // the horizon automatically); falls back to the configured defaults.
+  const forecastDateKeys = useMemo(
+    () => Object.keys(activeForecast).filter(k => /^\d{4}-\d{2}-\d{2}$/.test(k)).sort(),
+    [activeForecast]
+  );
+  const effStart = forecastDateKeys[0] || startDate;
+  const effEnd = forecastDateKeys[forecastDateKeys.length - 1] || endDate;
+
   // ── Merge DB spotlight with local motm state ──
   const activeMotm = dbSpotlight ? {
     name: dbSpotlight.team_members?.name || dbSpotlight.headline || motm.name,
@@ -238,7 +246,7 @@ export default function App() {
   };
   const activeTeams = !loading.members ? teamsFromDB : teams;
 
-  const dates = useMemo(() => getAllDates(startDate, endDate), [startDate, endDate]);
+  const dates = useMemo(() => getAllDates(effStart, effEnd), [effStart, effEnd]);
 
   // ── Load schedule from Supabase on startup ──
   // Convert dbCCSchedule { date: { memberId: {shift, override} } } to legacy format { date: { memberId: shift } }
@@ -260,14 +268,14 @@ export default function App() {
 
   // ── Generate CC schedule ──
   const handleGenerate = useCallback(() => {
-    const s = generateRotation(activeTeams.callCenter, startDate, endDate, overrides, settings, activeForecast);
+    const s = generateRotation(activeTeams.callCenter, effStart, effEnd, overrides, settings, activeForecast);
     setSchedule(s);
     setGenerated(true);
     // Persist to Supabase — pass current members directly to avoid stale context state
-    const start = new Date(startDate);
-    const end = new Date(endDate);
+    const start = new Date(effStart);
+    const end = new Date(effEnd);
     dbRegenerateSchedule(start, end, activeTeams.callCenter);
-  }, [activeTeams.callCenter, startDate, endDate, overrides, settings, activeForecast, dbRegenerateSchedule]);
+  }, [activeTeams.callCenter, effStart, effEnd, overrides, settings, activeForecast, dbRegenerateSchedule]);
 
   const coverage = useMemo(() => {
     if (!activeSchedule) return {};
@@ -420,6 +428,34 @@ export default function App() {
   };
 
   // ── File uploads ──
+  // Convert a worksheet to row objects, skipping any title banner by finding
+  // the header row that contains a "Date" column. Tolerant to leading junk rows.
+  const sheetToObjects = (ws) => {
+    const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, blankrows: false });
+    let hi = aoa.findIndex(row => row && row.some(c => String(c).trim().toLowerCase() === 'date'));
+    if (hi < 0) hi = 0;
+    const hdr = aoa[hi].map(c => (c == null ? '' : String(c).replace(/\s+/g, ' ').trim()));
+    const out = [];
+    for (let i = hi + 1; i < aoa.length; i++) {
+      const r = aoa[i]; if (!r || !r.length) continue;
+      const o = {}; hdr.forEach((h, j) => { if (h) o[h] = r[j]; });
+      if (Object.keys(o).length) out.push(o);
+    }
+    return out;
+  };
+
+  // Pick the worksheet that actually holds the daily data (has a Date header),
+  // not a parameters/legend sheet.
+  const pickDataSheet = (wb) => {
+    for (const name of wb.SheetNames) {
+      const aoa = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: true, blankrows: false });
+      if (aoa.slice(0, 8).some(row => row && row.some(c => String(c).trim().toLowerCase() === 'date'))) {
+        return wb.Sheets[name];
+      }
+    }
+    return wb.Sheets[wb.SheetNames[0]];
+  };
+
   const handleForecastUpload = e => {
     const file = e.target.files[0]; if (!file) return;
     const isCsv = file.name.toLowerCase().endsWith('.csv');
@@ -427,7 +463,6 @@ export default function App() {
     r.onload = evt => {
       let parsed;
       if (isCsv) {
-        // Parse CSV: split into rows and columns manually
         const text = evt.target.result;
         const lines = text.split('\n').filter(l => l.trim());
         const headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''));
@@ -439,36 +474,36 @@ export default function App() {
         });
         parsed = parseForecastFile(jsonRows);
       } else {
-        // Parse Excel binary. cellDates:true makes date cells come through as
-        // real Date objects instead of Excel serial numbers (e.g. 46178), which
-        // the parser would otherwise misread as the year 46178.
-        const wb = XLSX.read(evt.target.result, {type:'binary', cellDates:true});
-        parsed = parseForecastFile(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]));
+        // Excel: pick the data sheet and find the header row (handles the v3
+        // file's title banner and multi-sheet layout). cellDates keeps real
+        // date cells as Date objects.
+        const wb = XLSX.read(evt.target.result, { type: 'binary', cellDates: true });
+        parsed = parseForecastFile(sheetToObjects(pickDataSheet(wb)));
       }
       setForecast(parsed);
-      // Persist to Supabase
-      const rows = Object.entries(parsed).map(([forecast_date, data]) => ({
+      // Persist only the columns the forecast table knows about.
+      const rows = Object.entries(parsed).map(([forecast_date, d]) => ({
         forecast_date,
-        ...data,
+        total_calls: d.total_calls,
+        agent_calls: d.agent_calls,
       }));
       if (rows.length > 0) dbUploadForecast(rows);
     };
-    if (isCsv) {
-      r.readAsText(file);
-    } else {
-      r.readAsBinaryString(file);
-    }
+    if (isCsv) r.readAsText(file); else r.readAsBinaryString(file);
   };
   const handleHourlyUpload = e => {
     const file = e.target.files[0]; if (!file) return;
     const r = new FileReader();
     r.onload = evt => {
-      const wb = XLSX.read(evt.target.result, {type:'binary'});
+      const wb = XLSX.read(evt.target.result, { type: 'binary' });
       const parsed = parseHourlyFile(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]));
       setHourly(parsed);
-      // Persist so it survives reloads (updated monthly). Stored as a JSON
-      // string under the app settings key 'hourly_distribution'.
-      if (parsed.length > 0) dbSaveSetting('hourly_distribution', JSON.stringify(parsed));
+      if (parsed.length > 0) {
+        // Persist the curve and the derived per-shift split (used by the engine).
+        dbSaveSetting('hourly_distribution', JSON.stringify(parsed));
+        const weights = deriveShiftWeights(parsed);
+        if (weights) dbSaveSetting('shift_weights', weights);
+      }
     };
     r.readAsBinaryString(file);
   };
@@ -501,7 +536,7 @@ export default function App() {
       sumRows.push([s.name,m?.role||'',m?.sites||'',s.A,s.B,s.C,s.total,s.OFF]);
     });
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(sumRows), 'Manager Summary');
-    XLSX.writeFile(wb, `APS-schedule-${startDate}-to-${endDate}.xlsx`);
+    XLSX.writeFile(wb, `APS-schedule-${effStart}-to-${effEnd}.xlsx`);
   };
 
   // ── Coverage gap list (for dashboard) ──
@@ -717,8 +752,9 @@ export default function App() {
                 <div className="stat-card"><div className="stat-value">{activeTeams.callCenter.length + activeTeams.sales.length + activeTeams.collections.length + activeTeams.districts.length + activeTeams.admins.length + activeTeams.marketing.length + activeTeams.facilities.length + activeTeams.corporate.length}</div><div className="stat-label">Total Team Members</div></div>
                 <div className="stat-card good"><div className="stat-value">{generated ? Object.values(coverage).filter(c=>c.meetsTarget).length : '–'}</div><div className="stat-label">Days Meeting Target</div></div>
                 <div className="stat-card warn"><div className="stat-value">{generated ? Object.values(coverage).filter(c=>!c.meetsTarget).length : '–'}</div><div className="stat-label">Coverage Gaps</div></div>
-                <div className="stat-card peak"><div className="stat-value">{Object.keys(PEAK_DAYS).length}</div><div className="stat-label">Peak Days</div></div>
-                <div className="stat-card high"><div className="stat-value">{Object.keys(HIGH_DEMAND_DAYS).length}</div><div className="stat-label">High Demand Days</div></div>
+                <div className="stat-card peak"><div className="stat-value">{Object.values(coverage).filter(c=>c.isPeak).length}</div><div className="stat-label">Peak Days</div></div>
+                <div className="stat-card high"><div className="stat-value">{Object.values(coverage).filter(c=>c.isHighDemand).length}</div><div className="stat-label">High Demand Days</div></div>
+                <div className="stat-card good"><div className="stat-value">{Object.values(coverage).filter(c=>c.isLight).length}</div><div className="stat-label">Light Days (→ projects)</div></div>
               </div>
             </div>
           )}
@@ -1160,70 +1196,50 @@ export default function App() {
 
               <div className="settings-section">
                 <h3>Scheduling Engine</h3>
-                <p style={{fontSize:12,color:'var(--text-muted)',marginTop:-4,maxWidth:680}}>
-                  The schedule is demand-driven: every day is staffed up to its target.
-                  When a day is short, the least-burdened managers are pulled in from a
-                  day off to cover the gap, and shift anchors flex if a shift would
-                  otherwise be left uncovered. Days off and anchors are kept whenever
-                  there's enough coverage without them.
+                <p style={{fontSize:12,color:'var(--text-muted)',marginTop:-4,maxWidth:700}}>
+                  Everyone is scheduled 5 days per Mon–Sun week (2 days off; preferred
+                  pairs honored, others auto-staggered). Each day's required staffing
+                  comes from the forecast's True Demand, split across shifts by the
+                  uploaded hourly curve, with at least 1 person on every shift. Heavy
+                  days may pull someone to a 6th day (never a 7th, never 7 in a row);
+                  light days are flagged so you can shift people to projects.
                 </p>
 
-                <div className="form-row" style={{alignItems:'flex-start',gap:12,marginBottom:14}}>
-                  <label style={{display:'flex',alignItems:'flex-start',gap:10,cursor:'pointer',maxWidth:640}}>
-                    <input
-                      type="checkbox"
-                      checked={settings?.forecast_targets !== false}
-                      onChange={e=>dbSaveSetting('forecast_targets', e.target.checked)}
-                      style={{marginTop:3,width:16,height:16,flexShrink:0}}
-                    />
-                    <span>
-                      <strong>Forecast-driven staffing targets</strong>
-                      <br/>
-                      <span style={{fontSize:12,color:'var(--text-muted)'}}>
-                        When ON (default), each day's target is sized from the forecast call
-                        volume — lighter on quiet days (weekends), heavier midweek and on
-                        high-demand days. When OFF, every day uses the fixed 7 early / 2 mid /
-                        1 late target. Requires forecast data to be uploaded.
-                      </span>
-                    </span>
-                  </label>
-                </div>
-
                 <div className="form-row" style={{alignItems:'center',gap:10,marginBottom:14}}>
-                  <label style={{fontSize:13,minWidth:220}}>Calls per manager per day</label>
+                  <label style={{fontSize:13,minWidth:230}}>Calls per manager per day</label>
                   <input
-                    type="number" min="5" max="200"
+                    type="number" min="10" max="200"
                     className="form-input"
                     style={{width:90}}
-                    value={settings?.calls_per_agent ?? 30}
-                    onChange={e=>dbSaveSetting('calls_per_agent', Number(e.target.value) || 30)}
+                    value={settings?.calls_per_manager_day ?? 50}
+                    onChange={e=>dbSaveSetting('calls_per_manager_day', Number(e.target.value) || 50)}
                   />
-                  <span style={{fontSize:12,color:'var(--text-muted)',maxWidth:380}}>
-                    Lower = more managers scheduled per day; higher = fewer. Default 30.
-                    Only used when forecast-driven targets are ON.
+                  <span style={{fontSize:12,color:'var(--text-muted)',maxWidth:400}}>
+                    How many calls one manager handles in an 8-hour shift. Lower = more
+                    staff required per day; higher = fewer. Default 50 (from your AHT
+                    and effective utilization).
                   </span>
                 </div>
 
-                <div className="form-row" style={{alignItems:'flex-start',gap:12}}>
-                  <label style={{display:'flex',alignItems:'flex-start',gap:10,cursor:'pointer',maxWidth:640}}>
-                    <input
-                      type="checkbox"
-                      checked={!!settings?.force_all_peak}
-                      onChange={e=>dbSaveSetting('force_all_peak', e.target.checked)}
-                      style={{marginTop:3,width:16,height:16,flexShrink:0}}
-                    />
-                    <span>
-                      <strong>Force all-hands on peak days</strong>
-                      <br/>
-                      <span style={{fontSize:12,color:'var(--text-muted)'}}>
-                        When ON, every manager works peak / high-demand days regardless of
-                        their preferred day off. When OFF (default), peak days are staffed
-                        to target like any other day, keeping days off where coverage allows.
-                        Re-generate the Call Center schedule after changing this.
-                      </span>
-                    </span>
-                  </label>
+                <div className="form-row" style={{alignItems:'center',gap:10,marginBottom:6}}>
+                  <label style={{fontSize:13,minWidth:230}}>Minimum per shift</label>
+                  <input
+                    type="number" min="1" max="6"
+                    className="form-input"
+                    style={{width:90}}
+                    value={settings?.min_per_shift ?? 1}
+                    onChange={e=>dbSaveSetting('min_per_shift', Number(e.target.value) || 1)}
+                  />
+                  <span style={{fontSize:12,color:'var(--text-muted)',maxWidth:400}}>
+                    Floor for your slowest day — no shift drops below this many people.
+                    Default 1 (no shift left empty).
+                  </span>
                 </div>
+
+                <p style={{fontSize:12,color:'var(--text-muted)',maxWidth:700}}>
+                  Re-generate the Call Center schedule after changing these or uploading
+                  a new forecast / hourly file.
+                </p>
               </div>
 
               <div className="settings-section">
