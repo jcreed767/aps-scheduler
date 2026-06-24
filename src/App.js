@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { useApp } from './context/AppContext';
 import * as XLSX from 'xlsx';
 import { format, parseISO, getDay, addDays } from 'date-fns';
@@ -147,6 +147,19 @@ export default function App() {
   const [mascot, setMascot]         = useState(null);
   const [manualSchedules, setManualSchedules] = useState({ sales: {}, collections: {}, districts: {}, admins: {}, marketing: {}, facilities: {}, corporate: {} });
 
+  // ── Hydrate hourly distribution from persisted settings on startup ──
+  // Stored as a JSON string under settings.hourly_distribution (updated monthly).
+  useEffect(() => {
+    if (hourlyData.length > 0) return;
+    const raw = settings?.hourly_distribution;
+    if (!raw) return;
+    try {
+      const parsed = Array.isArray(raw) ? raw : JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) setHourly(parsed);
+    } catch { /* ignore malformed value */ }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings?.hourly_distribution]);
+
   // ── Merge DB forecast with local state ──
   const activeForecast = (dbForecast && Object.keys(dbForecast).length > 0) ? dbForecast : forecastData;
 
@@ -247,19 +260,19 @@ export default function App() {
 
   // ── Generate CC schedule ──
   const handleGenerate = useCallback(() => {
-    const s = generateRotation(activeTeams.callCenter, startDate, endDate, overrides, settings);
+    const s = generateRotation(activeTeams.callCenter, startDate, endDate, overrides, settings, activeForecast);
     setSchedule(s);
     setGenerated(true);
     // Persist to Supabase — pass current members directly to avoid stale context state
     const start = new Date(startDate);
     const end = new Date(endDate);
     dbRegenerateSchedule(start, end, activeTeams.callCenter);
-  }, [activeTeams.callCenter, startDate, endDate, overrides, settings, dbRegenerateSchedule]);
+  }, [activeTeams.callCenter, startDate, endDate, overrides, settings, activeForecast, dbRegenerateSchedule]);
 
   const coverage = useMemo(() => {
     if (!activeSchedule) return {};
-    return analyzeCoverage(activeSchedule, activeTeams.callCenter, activeForecast);
-  }, [activeSchedule, activeTeams.callCenter, activeForecast]);
+    return analyzeCoverage(activeSchedule, activeTeams.callCenter, activeForecast, settings);
+  }, [activeSchedule, activeTeams.callCenter, activeForecast, settings]);
 
   const managerSummary = useMemo(() => {
     if (!activeSchedule) return [];
@@ -449,7 +462,14 @@ export default function App() {
   const handleHourlyUpload = e => {
     const file = e.target.files[0]; if (!file) return;
     const r = new FileReader();
-    r.onload = evt => { const wb = XLSX.read(evt.target.result, {type:'binary'}); setHourly(parseHourlyFile(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]))); };
+    r.onload = evt => {
+      const wb = XLSX.read(evt.target.result, {type:'binary'});
+      const parsed = parseHourlyFile(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]));
+      setHourly(parsed);
+      // Persist so it survives reloads (updated monthly). Stored as a JSON
+      // string under the app settings key 'hourly_distribution'.
+      if (parsed.length > 0) dbSaveSetting('hourly_distribution', JSON.stringify(parsed));
+    };
     r.readAsBinaryString(file);
   };
   const handleMotmPhoto = e => {
@@ -888,14 +908,17 @@ export default function App() {
                 });
                 return (
                   <table className="data-table">
-                    <thead><tr><th>Manager</th><th>Role</th><th>Sites</th><th>8am–4pm</th><th>12pm–8pm</th><th>2pm–10pm</th><th>Total Working</th><th>Days Off</th><th>Anchor</th><th>Pref. Days Off</th><th>⚠</th></tr></thead>
+                    <thead><tr><th>Manager</th><th>Role</th><th>Sites</th><th>8am–4pm</th><th>12pm–8pm</th><th>2pm–10pm</th><th>Total Working</th><th>Days Off</th><th>Anchor</th><th>Pref. Days Off</th><th>7+ Consec. Days</th></tr></thead>
                     <tbody>
                       {managerSummary.map(s=>{
                         const mgr=activeTeams.callCenter.find(m=>m.id===s.id);
                         const maxConsec = fatigueMap[s.id] || 0;
-                        const fatigued = maxConsec > 7;
+                        const overworked = maxConsec >= 7; // 7+ consecutive working days, any shift
+                        const rowStyle = overworked
+                          ? {background:'#FDE2E1',borderLeft:'3px solid #F87171'}
+                          : {};
                         return (
-                          <tr key={s.id} style={fatigued ? {background:'#FFF3CD',borderLeft:'3px solid #E6B43E'} : {}}>
+                          <tr key={s.id} style={rowStyle}>
                             <td className="font-bold">{s.name}</td>
                             <td className="text-muted">{mgr?.role}</td>
                             <td className="text-muted" style={{fontSize:11}}>{mgr?.sites||'–'}</td>
@@ -918,8 +941,13 @@ export default function App() {
                               })()}
                             </td>
                             <td>
-                              {fatigued
-                                ? <span className="fatigue-badge" title={`${maxConsec} consecutive working days`}>⚠ {maxConsec}d</span>
+                              {overworked
+                                ? <span
+                                    style={{display:'inline-block',background:'#F87171',color:'#fff',fontSize:11,fontWeight:700,padding:'2px 8px',borderRadius:10}}
+                                    title={`${maxConsec} consecutive working days scheduled`}
+                                  >
+                                    ⚠ {maxConsec}d
+                                  </span>
                                 : <span className="text-muted">–</span>}
                             </td>
                           </tr>
@@ -1132,21 +1160,65 @@ export default function App() {
 
               <div className="settings-section">
                 <h3>Scheduling Engine</h3>
+                <p style={{fontSize:12,color:'var(--text-muted)',marginTop:-4,maxWidth:680}}>
+                  The schedule is demand-driven: every day is staffed up to its target.
+                  When a day is short, the least-burdened managers are pulled in from a
+                  day off to cover the gap, and shift anchors flex if a shift would
+                  otherwise be left uncovered. Days off and anchors are kept whenever
+                  there's enough coverage without them.
+                </p>
+
+                <div className="form-row" style={{alignItems:'flex-start',gap:12,marginBottom:14}}>
+                  <label style={{display:'flex',alignItems:'flex-start',gap:10,cursor:'pointer',maxWidth:640}}>
+                    <input
+                      type="checkbox"
+                      checked={settings?.forecast_targets !== false}
+                      onChange={e=>dbSaveSetting('forecast_targets', e.target.checked)}
+                      style={{marginTop:3,width:16,height:16,flexShrink:0}}
+                    />
+                    <span>
+                      <strong>Forecast-driven staffing targets</strong>
+                      <br/>
+                      <span style={{fontSize:12,color:'var(--text-muted)'}}>
+                        When ON (default), each day's target is sized from the forecast call
+                        volume — lighter on quiet days (weekends), heavier midweek and on
+                        high-demand days. When OFF, every day uses the fixed 7 early / 2 mid /
+                        1 late target. Requires forecast data to be uploaded.
+                      </span>
+                    </span>
+                  </label>
+                </div>
+
+                <div className="form-row" style={{alignItems:'center',gap:10,marginBottom:14}}>
+                  <label style={{fontSize:13,minWidth:220}}>Calls per manager per day</label>
+                  <input
+                    type="number" min="5" max="200"
+                    className="form-input"
+                    style={{width:90}}
+                    value={settings?.calls_per_agent ?? 30}
+                    onChange={e=>dbSaveSetting('calls_per_agent', Number(e.target.value) || 30)}
+                  />
+                  <span style={{fontSize:12,color:'var(--text-muted)',maxWidth:380}}>
+                    Lower = more managers scheduled per day; higher = fewer. Default 30.
+                    Only used when forecast-driven targets are ON.
+                  </span>
+                </div>
+
                 <div className="form-row" style={{alignItems:'flex-start',gap:12}}>
                   <label style={{display:'flex',alignItems:'flex-start',gap:10,cursor:'pointer',maxWidth:640}}>
                     <input
                       type="checkbox"
-                      checked={!!settings?.smart_peak_override}
-                      onChange={e=>dbSaveSetting('smart_peak_override', e.target.checked)}
+                      checked={!!settings?.force_all_peak}
+                      onChange={e=>dbSaveSetting('force_all_peak', e.target.checked)}
                       style={{marginTop:3,width:16,height:16,flexShrink:0}}
                     />
                     <span>
-                      <strong>Smart peak-day override</strong> — preserve preferred days off where coverage allows.
+                      <strong>Force all-hands on peak days</strong>
                       <br/>
                       <span style={{fontSize:12,color:'var(--text-muted)'}}>
-                        When ON, peak / high-demand days pull in only enough managers to hit the
-                        staffing target, choosing the least-burdened first (fairest to override).
-                        When OFF (default), every manager is forced to work peak / high-demand days.
+                        When ON, every manager works peak / high-demand days regardless of
+                        their preferred day off. When OFF (default), peak days are staffed
+                        to target like any other day, keeping days off where coverage allows.
                         Re-generate the Call Center schedule after changing this.
                       </span>
                     </span>

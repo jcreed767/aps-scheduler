@@ -364,22 +364,23 @@ export function AppProvider({ children }) {
 
   /**
    * Run the rotation engine and persist results.
-   * Preserves existing overrides automatically (db layer handles it).
+   * Accepts optional members override so App.js can pass current UI members
+   * directly, bypassing any stale context state (e.g. after a recent update).
    */
-  const regenerateSchedule = useCallback(async (startDate, endDate) => {
-    const ccMembers = state.members.callcenter;
+  const regenerateSchedule = useCallback(async (startDate, endDate, membersOverride) => {
+    const ccMembers = membersOverride || state.members.callcenter;
     if (!ccMembers.length) return;
 
     dispatch({ type: 'SET_LOADING', key: 'schedule', value: true });
     try {
-      const generated = generateSchedule(ccMembers, startDate, endDate, state.settings);
+      const generated = generateSchedule(ccMembers, startDate, endDate, state.settings, state.forecast);
       await db.upsertGeneratedSchedule(generated);
       const rows = await db.getCCSchedule(startDate, endDate);
       dispatch({ type: 'SET_CC_SCHEDULE', rows });
     } finally {
       dispatch({ type: 'SET_LOADING', key: 'schedule', value: false });
     }
-  }, [state.members.callcenter, state.settings]);
+  }, [state.members.callcenter, state.settings, state.forecast]);
 
   /** Click-to-edit a single cell in the CC grid */
   const setCCCell = useCallback(async (memberId, date, shift) => {
