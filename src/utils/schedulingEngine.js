@@ -457,16 +457,33 @@ export const parseForecastFile = (data) => {
     if (!dateRaw) return;
 
     let dk;
-    const dateStr = String(dateRaw).trim();
+    const pad2 = (n) => String(n).padStart(2, '0');
 
-    // If already in YYYY-MM-DD format, use directly (avoids timezone shift)
-    if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-      dk = dateStr;
+    if (dateRaw instanceof Date && !isNaN(dateRaw)) {
+      // Real Date object (from XLSX read with cellDates:true). SheetJS stores
+      // dates at UTC midnight, so read UTC parts to avoid a local-timezone
+      // off-by-one (e.g. Eastern time rolling 06-05 back to 06-04).
+      dk = `${dateRaw.getUTCFullYear()}-${pad2(dateRaw.getUTCMonth() + 1)}-${pad2(dateRaw.getUTCDate())}`;
     } else {
-      // Parse natural language dates like "Thursday, January 1, 2026"
-      const parsed = new Date(dateStr);
-      if (isNaN(parsed)) return;
-      dk = getDateKey(parsed);
+      const dateStr = String(dateRaw).trim();
+
+      if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+        // Already YYYY-MM-DD (e.g. CSV) — use directly (avoids timezone shift)
+        dk = dateStr;
+      } else if (/^\d+(\.\d+)?$/.test(dateStr)) {
+        // Bare number = Excel serial date (e.g. 46178 = 2026-06-05). Without
+        // this branch, String(46178) was parsed as the YEAR 46178. Convert
+        // via the Unix epoch in UTC to stay timezone-safe.
+        const serial = parseFloat(dateStr);
+        const d = new Date(Math.round((serial - 25569) * 86400 * 1000));
+        if (isNaN(d)) return;
+        dk = `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+      } else {
+        // Natural-language date like "Thursday, January 1, 2026"
+        const parsed = new Date(dateStr);
+        if (isNaN(parsed)) return;
+        dk = getDateKey(parsed);
+      }
     }
 
     const totalCalls =

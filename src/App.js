@@ -426,8 +426,10 @@ export default function App() {
         });
         parsed = parseForecastFile(jsonRows);
       } else {
-        // Parse Excel binary
-        const wb = XLSX.read(evt.target.result, {type:'binary'});
+        // Parse Excel binary. cellDates:true makes date cells come through as
+        // real Date objects instead of Excel serial numbers (e.g. 46178), which
+        // the parser would otherwise misread as the year 46178.
+        const wb = XLSX.read(evt.target.result, {type:'binary', cellDates:true});
         parsed = parseForecastFile(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]));
       }
       setForecast(parsed);
