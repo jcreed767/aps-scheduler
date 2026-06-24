@@ -1197,12 +1197,16 @@ export default function App() {
               <div className="settings-section">
                 <h3>Scheduling Engine</h3>
                 <p style={{fontSize:12,color:'var(--text-muted)',marginTop:-4,maxWidth:700}}>
-                  Everyone is scheduled 5 days per Mon–Sun week (2 days off; preferred
-                  pairs honored, others auto-staggered). Each day's required staffing
-                  comes from the forecast's True Demand, split across shifts by the
-                  uploaded hourly curve, with at least 1 person on every shift. Heavy
-                  days may pull someone to a 6th day (never a 7th, never 7 in a row);
-                  light days are flagged so you can shift people to projects.
+                  Everyone is scheduled 5 days per Mon–Sun week (2 consecutive days off).
+                  Preferred day-off pairs are honored, but only so many managers can be
+                  off on the same day — enough always stay on to cover the forecast.
+                  When a day is oversubscribed, managers with a lower Priority number
+                  (set per manager below) keep their preferred days; the rest are rotated
+                  fairly week to week and given an alternate consecutive pair. Each day's
+                  required staffing comes from the forecast's True Demand, split across
+                  shifts by the uploaded hourly curve, with at least 1 person on every
+                  shift. Heavy days may pull someone to a 6th day (never a 7th, never 7
+                  in a row); light days are flagged so you can shift people to projects.
                 </p>
 
                 <div className="form-row" style={{alignItems:'center',gap:10,marginBottom:14}}>
@@ -1291,6 +1295,7 @@ export default function App() {
                         <th>Sites Managed</th>
                         <th>Shift Anchor</th>
                         <th>Preferred Days Off</th>
+                        {tk==='callCenter' && <th title="Lower number = higher priority for keeping preferred days off. Leave blank to rotate fairly.">Priority</th>}
                         <th></th>
                       </tr>
                     </thead>
@@ -1313,6 +1318,21 @@ export default function App() {
                                   <option value="">No preference</option>
                                   {DAYS_OFF_PAIRS.map(p=><option key={p.value} value={p.value}>{p.label}</option>)}
                                 </select>
+                              </td>
+                              <td>
+                                <input
+                                  className="inline-input"
+                                  type="number" min="1" max="99"
+                                  style={{width:64}}
+                                  placeholder="–"
+                                  value={settings?.member_priority?.[m.id] ?? ''}
+                                  onChange={e=>{
+                                    const map = { ...(settings?.member_priority || {}) };
+                                    if (e.target.value === '') delete map[m.id];
+                                    else map[m.id] = Number(e.target.value);
+                                    dbSaveSetting('member_priority', map);
+                                  }}
+                                />
                               </td>
                             </>
                           ) : (

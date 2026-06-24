@@ -69,6 +69,68 @@ function memberDaysOff(member, index) {
   return PREF_DAYS_OFF[val];
 }
 
+// Max managers allowed off on the same day-of-week, so a working crew always
+// remains. Defaults to the smallest value that still lets everyone take 2
+// consecutive days off (ceil(2N/7)), plus a little slack for clustering.
+function maxOffPerDay(rosterSize, settings = {}) {
+  if (settings.max_off_per_day != null) return Number(settings.max_off_per_day);
+  const feasibleMin = Math.ceil((2 * rosterSize) / 7);
+  return feasibleMin + 1;
+}
+
+/**
+ * Coordinated weekly days-off allocation.
+ *
+ * Honors each manager's preferred consecutive pair, but never lets more than
+ * `maxOffPerDay` managers share a day off — so every day keeps a working crew
+ * (this is what prevents the "everyone off Wednesday" collapse).
+ *
+ * Conflict order:
+ *   1. Explicit priority (settings.member_priority[id], lower = keeps preference)
+ *   2. Unranked managers in fair-rotation order (start point rotates each week,
+ *      so the same people aren't bumped every time)
+ * Overflow managers get the nearest alternate consecutive pair that still has
+ * capacity, so they still receive two consecutive days off.
+ *
+ * @returns {Object} memberId → [d1, d2]
+ */
+export function allocateWeekDaysOff(members, settings = {}, weekIndex = 0) {
+  const roster = members || [];
+  const N = roster.length;
+  const cap = maxOffPerDay(N, settings);
+  const prio = settings.member_priority || {};
+
+  const ranked = roster.filter((m) => prio[m.id] != null)
+    .sort((a, b) => Number(prio[a.id]) - Number(prio[b.id]));
+  let unranked = roster.filter((m) => prio[m.id] == null);
+  if (unranked.length > 1) {
+    const rot = ((weekIndex % unranked.length) + unranked.length) % unranked.length;
+    unranked = unranked.slice(rot).concat(unranked.slice(0, rot));
+  }
+  const ordered = [...ranked, ...unranked];
+
+  const PAIRS = AUTO_PAIR_VALUES.map((v) => PREF_DAYS_OFF[v]);
+  const offCount = [0, 0, 0, 0, 0, 0, 0];
+  const canPlace = (pair) => pair.every((d) => offCount[d] < cap);
+  const assignment = {};
+  const place = (id, pair) => { pair.forEach((d) => { offCount[d]++; }); assignment[id] = pair; };
+
+  ordered.forEach((m, idx) => {
+    const pref = PREF_DAYS_OFF[Number(m.rotationOffset ?? m.rotation_offset)];
+    if (pref && canPlace(pref)) { place(m.id, pref); return; }
+    // Nearest alternate consecutive pair with capacity; rotate start for fairness.
+    const start = (weekIndex + idx) % PAIRS.length;
+    let placed = false;
+    for (let k = 0; k < PAIRS.length; k++) {
+      const pair = PAIRS[(start + k) % PAIRS.length];
+      if (canPlace(pair)) { place(m.id, pair); placed = true; break; }
+    }
+    if (!placed) place(m.id, pref || PAIRS[idx % PAIRS.length]); // last resort
+  });
+
+  return assignment;
+}
+
 // ─── Demand → required staffing ──────────────────────────────
 
 function shiftWeights(settings = {}) {
@@ -223,17 +285,18 @@ function assignShifts(workingMembers, targets, minPer = 1) {
  * `stats[id]` carries { worked, consec, weekWorked, weekKey } as of days
  * BEFORE this date (read-only; caller updates after).
  */
-export function resolveDayAssignments(members, date, dateStr, settings = {}, stats = {}, forecast = {}) {
+export function resolveDayAssignments(members, date, dateStr, settings = {}, stats = {}, forecast = {}, daysOffMap = null) {
   const roster = members || [];
-  const rosterSize = roster.length;
   const dow = getDay(date);
 
   // Baseline 5-day week: off iff today is one of the member's two days off.
+  // Use the coordinated weekly allocation when provided (coverage-aware);
+  // otherwise fall back to each member's own pair.
   const workingBase = [];
   const offBase = [];
   roster.forEach((m, i) => {
-    const [d1, d2] = memberDaysOff(m, i);
-    if (dow === d1 || dow === d2) offBase.push(m);
+    const pair = (daysOffMap && daysOffMap[m.id]) || memberDaysOff(m, i);
+    if (dow === pair[0] || dow === pair[1]) offBase.push(m);
     else workingBase.push(m);
   });
 
@@ -286,17 +349,37 @@ function bump(stats, id, didWork) {
   else { st.consec = 0; }
 }
 
-export function generateSchedule(members, startDate, endDate, settings = {}, forecast = {}) {
+export function generateSchedule(members, startDate, endDate, settings = {}, forecast = {}, locked = null) {
   if (!members || members.length === 0) return [];
   const days = eachDayOfInterval({ start: startDate, end: endDate });
   const rows = [];
   const stats = makeStats(members);
+  const lockedDates = locked && locked.dates ? locked.dates : null;
+  const lockedExisting = (locked && locked.existing) || {};
+
+  let curWeekKey = null;
+  let weekIndex = -1;
+  let daysOffMap = null;
 
   days.forEach((date) => {
     const dateStr = format(date, 'yyyy-MM-dd');
-    rollWeek(stats, members, weekKeyOf(date));
-    const { assignments, offMembers } = resolveDayAssignments(members, date, dateStr, settings, stats, forecast);
+    const wk = weekKeyOf(date);
+    if (wk !== curWeekKey) { curWeekKey = wk; weekIndex += 1; daysOffMap = allocateWeekDaysOff(members, settings, weekIndex); }
+    rollWeek(stats, members, wk);
 
+    // Locked day: keep the already-published shifts; still advance stats so
+    // later (unlocked) weeks continue coherently.
+    if (lockedDates && lockedDates.has(dateStr)) {
+      const day = lockedExisting[dateStr] || {};
+      members.forEach((m) => {
+        const shift = day[m.id] || 'OFF';
+        rows.push({ member_id: m.id, schedule_date: dateStr, shift, is_override: false, locked: true });
+        bump(stats, m.id, shift !== 'OFF');
+      });
+      return;
+    }
+
+    const { assignments, offMembers } = resolveDayAssignments(members, date, dateStr, settings, stats, forecast, daysOffMap);
     assignments.forEach(({ member, shift }) => {
       rows.push({ member_id: member.id, schedule_date: dateStr, shift, is_override: false });
       bump(stats, member.id, true);
@@ -309,16 +392,35 @@ export function generateSchedule(members, startDate, endDate, settings = {}, for
   return rows;
 }
 
-export const generateRotation = (members, startDate, endDate, overrides = {}, settings = {}, forecast = {}) => {
+export const generateRotation = (members, startDate, endDate, overrides = {}, settings = {}, forecast = {}, locked = null) => {
   const days = getAllDates(startDate, endDate);
   const result = {};
   const stats = makeStats(members);
+  const lockedDates = locked && locked.dates ? locked.dates : null;
+  const lockedExisting = (locked && locked.existing) || {};
+
+  let curWeekKey = null;
+  let weekIndex = -1;
+  let daysOffMap = null;
 
   days.forEach((date) => {
     const dk = getDateKey(date);
-    rollWeek(stats, members, weekKeyOf(date));
-    const { assignments, offMembers } = resolveDayAssignments(members, date, dk, settings, stats, forecast);
+    const wk = weekKeyOf(date);
+    if (wk !== curWeekKey) { curWeekKey = wk; weekIndex += 1; daysOffMap = allocateWeekDaysOff(members, settings, weekIndex); }
+    rollWeek(stats, members, wk);
     result[dk] = {};
+
+    if (lockedDates && lockedDates.has(dk)) {
+      const day = lockedExisting[dk] || {};
+      members.forEach((m) => {
+        const shift = day[m.id] || 'OFF';
+        result[dk][m.id] = shift;
+        bump(stats, m.id, shift !== 'OFF');
+      });
+      return;
+    }
+
+    const { assignments, offMembers } = resolveDayAssignments(members, date, dk, settings, stats, forecast, daysOffMap);
     assignments.forEach(({ member, shift }) => {
       result[dk][member.id] = overrides[dk]?.[member.id] || shift;
       bump(stats, member.id, true);
